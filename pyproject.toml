@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyhwpxlib"
@@ -30,7 +30,8 @@ dependencies = []
 [project.optional-dependencies]
 images = ["Pillow>=9.0"]
 lxml = ["lxml>=4.9"]
-all = ["Pillow>=9.0", "lxml>=4.9"]
+hwp = ["olefile>=0.46"]
+all = ["Pillow>=9.0", "lxml>=4.9", "olefile>=0.46"]
 
 [project.scripts]
 pyhwpxlib = "pyhwpxlib.cli:main"

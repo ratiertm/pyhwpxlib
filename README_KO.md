@@ -31,6 +31,9 @@ pip install pyhwpxlib[images]    # Pillow
 # 선택: 빠른 XML 파싱
 pip install pyhwpxlib[lxml]      # lxml
 
+# 선택: HWP 5.x → HWPX 변환
+pip install pyhwpxlib[hwp]       # olefile
+
 # 전부 설치
 pip install pyhwpxlib[all]
 ```
@@ -92,7 +95,7 @@ AI → pyhwpxlib 호출 → 보고서.hwpx
 
 ## CLI 명령어 레퍼런스
 
-`pip install pyhwpxlib` 설치 시 `pyhwpxlib` 명령어 6개가 함께 설치됩니다:
+`pip install pyhwpxlib` 설치 시 `pyhwpxlib` 명령어 9개가 함께 설치됩니다:
 
 ### md2hwpx -- 마크다운을 HWPX로 변환
 
@@ -145,13 +148,37 @@ pyhwpxlib merge 1장.hwpx 2장.hwpx 3장.hwpx -o 전체.hwpx
 
 문서 사이에 페이지 나누기가 자동 삽입됩니다.
 
+### unpack -- HWPX를 폴더로 풀기
+
+```bash
+pyhwpxlib unpack 문서.hwpx -o unpacked/
+```
+
+HWPX ZIP 안의 XML과 바이너리 파일을 폴더로 추출합니다.
+
+### pack -- 폴더를 HWPX로 묶기
+
+```bash
+pyhwpxlib pack unpacked/ -o output.hwpx
+```
+
+풀었던 폴더를 다시 HWPX 파일로 패키징합니다. `mimetype` 항목은 OWPML 스펙에 따라 비압축 저장됩니다.
+
+### validate -- HWPX 구조 검증
+
+```bash
+pyhwpxlib validate output.hwpx
+```
+
+필수 파일(`mimetype`, `header.xml`, `section0.xml`, `content.hpf`) 존재 여부와 XML 파싱을 검사합니다. 성공 시 종료 코드 0, 실패 시 1.
+
 ---
 
 ## Python API
 
 ### 문서 생성 (HwpxBuilder)
 
-메서드 체이닝 방식의 고수준 빌더입니다. 표 스타일 프리셋(`corporate`, `government`, `academic`, `default`)을 지원합니다.
+HWPX 문서를 생성하는 고수준 빌더입니다. 표 스타일 프리셋(`corporate`, `government`, `academic`, `default`)을 지원합니다.
 
 ```python
 doc = HwpxBuilder(table_preset='corporate')
@@ -251,10 +278,10 @@ fill_template_batch(
 ### 기존 문서 편집 (언팩/팩)
 
 ```bash
-python -m pyhwpxlib unpack 문서.hwpx unpacked/       # ZIP을 폴더로 풀기
+pyhwpxlib unpack 문서.hwpx -o unpacked/        # ZIP을 폴더로 풀기
 # unpacked/Contents/ 안의 XML 파일을 직접 편집
-python -m pyhwpxlib pack unpacked/ output.hwpx        # 다시 HWPX로 묶기
-python -m pyhwpxlib validate output.hwpx              # 구조 검증
+pyhwpxlib pack unpacked/ -o output.hwpx         # 다시 HWPX로 묶기
+pyhwpxlib validate output.hwpx                  # 구조 검증
 ```
 
 ---

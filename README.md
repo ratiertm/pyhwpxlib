@@ -30,6 +30,9 @@ pip install pyhwpxlib[images]    # Pillow
 # Optional: faster XML parsing
 pip install pyhwpxlib[lxml]      # lxml
 
+# Optional: HWP 5.x → HWPX conversion
+pip install pyhwpxlib[hwp]       # olefile
+
 # Install everything
 pip install pyhwpxlib[all]
 ```
@@ -77,7 +80,7 @@ fill_template_checkbox(
 
 ## CLI Reference
 
-`pip install pyhwpxlib` installs the `pyhwpxlib` command with 6 subcommands:
+`pip install pyhwpxlib` installs the `pyhwpxlib` command with 9 subcommands:
 
 ### md2hwpx -- Markdown to HWPX
 
@@ -130,13 +133,37 @@ pyhwpxlib merge part1.hwpx part2.hwpx part3.hwpx -o combined.hwpx
 
 Inserts page breaks between documents automatically.
 
+### unpack -- Extract HWPX to folder
+
+```bash
+pyhwpxlib unpack document.hwpx -o unpacked/
+```
+
+Extracts all XML and binary files from the HWPX ZIP for direct editing.
+
+### pack -- Re-package folder as HWPX
+
+```bash
+pyhwpxlib pack unpacked/ -o output.hwpx
+```
+
+Re-creates a valid HWPX file from an unpacked folder. The `mimetype` entry is stored uncompressed per the OWPML spec.
+
+### validate -- Validate HWPX structure
+
+```bash
+pyhwpxlib validate output.hwpx
+```
+
+Checks for required files (`mimetype`, `header.xml`, `section0.xml`, `content.hpf`) and validates XML parsing. Returns exit code 0 on success, 1 on failure.
+
 ---
 
 ## Python API
 
 ### Document Creation (HwpxBuilder)
 
-High-level builder with method chaining. Includes table style presets (`corporate`, `government`, `academic`, `default`).
+High-level builder for creating HWPX documents. Includes table style presets (`corporate`, `government`, `academic`, `default`).
 
 ```python
 doc = HwpxBuilder(table_preset='corporate')
@@ -236,10 +263,10 @@ fill_template_batch(
 ### Edit Existing Documents (Unpack/Pack)
 
 ```bash
-python -m pyhwpxlib unpack document.hwpx unpacked/   # Extract ZIP to folder
+pyhwpxlib unpack document.hwpx -o unpacked/    # Extract ZIP to folder
 # Edit XML files in unpacked/Contents/ directly
-python -m pyhwpxlib pack unpacked/ output.hwpx        # Re-package as HWPX
-python -m pyhwpxlib validate output.hwpx              # Validate structure
+pyhwpxlib pack unpacked/ -o output.hwpx         # Re-package as HWPX
+pyhwpxlib validate output.hwpx                  # Validate structure
 ```
 
 ---

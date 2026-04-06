@@ -4,7 +4,7 @@ import zipfile
 import pytest
 from pathlib import Path
 
-from scripts.create import HwpxBuilder, TABLE_PRESETS
+from pyhwpxlib.builder import HwpxBuilder, TABLE_PRESETS
 
 
 OUTPUT_DIR = Path(__file__).parent / "output"
