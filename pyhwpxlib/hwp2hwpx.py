@@ -2717,7 +2717,7 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
     _GSO_TYPE_OLE       = 0x246F6C65  # '$ole'
     _GSO_TYPE_CONTAINER = 0x24636F6E  # '$con'
     _GSO_TYPE_CONNECTLN = 0x24636C6E  # '$cln'  or 0x246C6F63 '$loc'
-    _GSO_TYPE_TEXTART   = 0x24747841  # '$txA' or 0x24746174 '$tat'
+    _GSO_TYPE_TEXTART   = 0x24746174  # '$tat'
 
     if sc_type_id == _GSO_TYPE_PICTURE:
         return _try_build_picture(shape_info, hwp)
@@ -2729,6 +2729,8 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
         return _build_ole_object(shape_info, hwp)
     elif sc_type_id == _GSO_TYPE_CONTAINER:
         return _build_container_object(shape_info, hwp)
+    elif sc_type_id == _GSO_TYPE_TEXTART:
+        return _build_textart_object(shape_info, hwp)
     else:
         logger.debug("GSO: unsupported type 0x%08X, skipping", sc_type_id)
         return None
@@ -3172,3 +3174,110 @@ def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[A
 
     logger.info("GSO: built Container with %d children", child_count)
     return container
+
+
+def _build_textart_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
+    """Build a TextArt object from GSO sub-records."""
+    from .objects.section.objects.text_art import TextArt, TextArtPr
+    from .objects.section.objects.drawing_object import ShapeSize, ShapePosition
+    from .objects.common.base_objects import LeftRightTopBottom, Point
+    from .object_type import ObjectType
+
+    ta = TextArt()
+    ta.so_id = "0"
+    ta.z_order = shape_info['z_order']
+    ta.text_wrap = "TOP_AND_BOTTOM"
+    ta.text_flow = "BOTH_SIDES"
+    ta.lock = False
+
+    ta.sz = ShapeSize()
+    ta.sz.width = shape_info['width']
+    ta.sz.height = shape_info['height']
+    ta.sz.width_rel_to = "ABSOLUTE"
+    ta.sz.height_rel_to = "ABSOLUTE"
+    ta.sz.protect = False
+
+    ta.pos = ShapePosition()
+    ta.pos.treat_as_char = bool(shape_info['property'] & 0x01)
+    ta.pos.affect_line_spacing = bool(shape_info['property'] & 0x02)
+    ta.pos.vert_rel_to = "PARA"
+    ta.pos.horz_rel_to = "COLUMN"
+    ta.pos.vert_align = "TOP"
+    ta.pos.horz_align = "LEFT"
+    ta.pos.vert_offset = shape_info['y_offset']
+    ta.pos.horz_offset = shape_info['x_offset']
+    ta.pos.flow_with_text = False
+    ta.pos.allow_overlap = True
+    ta.pos.hold_anchor_and_so = False
+
+    ta.out_margin = LeftRightTopBottom(ObjectType.hp_outMargin)
+    ta.out_margin.left = shape_info['margin_left']
+    ta.out_margin.right = shape_info['margin_right']
+    ta.out_margin.top = shape_info['margin_top']
+    ta.out_margin.bottom = shape_info['margin_bottom']
+
+    w, h = shape_info['width'], shape_info['height']
+    ta.pt0 = Point(ObjectType.hc_pt0)
+    ta.pt0.x, ta.pt0.y = 0, 0
+    ta.pt1 = Point(ObjectType.hc_pt1)
+    ta.pt1.x, ta.pt1.y = w, 0
+    ta.pt2 = Point(ObjectType.hc_pt2)
+    ta.pt2.x, ta.pt2.y = w, h
+    ta.pt3 = Point(ObjectType.hc_pt3)
+    ta.pt3.x, ta.pt3.y = 0, h
+
+    # Try to extract text content from ShapeComponent data
+    sc_data = shape_info['sc_data']
+    ta.text = _extract_textart_text(sc_data)
+
+    # TextArt properties
+    ta.textart_pr = TextArtPr()
+    ta.textart_pr.font_name = "바탕"
+    ta.textart_pr.font_style = "Regular"
+    ta.textart_pr.text_shape = "WAVE_1"
+    ta.textart_pr.line_spacing = 100
+    ta.textart_pr.char_spacing = 0
+    ta.textart_pr.align = "LEFT"
+
+    # Parse lineInfo/shadow from SC data
+    line_shape, shadow = _parse_sc_line_and_shadow(sc_data)
+    if line_shape is not None:
+        ta.line_shape = line_shape
+    if shadow is not None:
+        ta.shadow = shadow
+
+    logger.info("GSO: built TextArt '%s' (%dx%d)", (ta.text or '')[:20], w, h)
+    return ta
+
+
+def _extract_textart_text(sc_data: bytes) -> str:
+    """Extract text content from TextArt ShapeComponent data.
+
+    The text is stored as UTF-16LE string somewhere in the SC data,
+    typically after the common fields and type-specific geometry.
+    """
+    # TextArt SC layout (approximate):
+    # type_id(4) + type_id_repeat(4) + offset(8) + orgSz(8) + curSz(8) +
+    # flip(4) + rotation(6) + renderingInfo(varies) + instid(4) +
+    # lineInfo(13+) + fillInfo(varies) + shadowInfo(varies) +
+    # text_len(2) + text_utf16(text_len*2) + font_name + ...
+
+    if len(sc_data) < 50:
+        return ""
+
+    # Strategy: scan for a UTF-16LE text string by looking for a uint16 length
+    # followed by printable Korean/ASCII characters
+    best_text = ""
+    for off in range(40, min(len(sc_data) - 4, 250), 2):
+        try:
+            text_len = struct.unpack_from('<H', sc_data, off)[0]
+            if 1 <= text_len <= 100 and off + 2 + text_len * 2 <= len(sc_data):
+                candidate = sc_data[off + 2:off + 2 + text_len * 2].decode('utf-16-le', errors='strict')
+                # Check if it looks like real text (has printable chars)
+                if candidate and all(c.isprintable() or c in '\r\n\t' for c in candidate):
+                    if len(candidate) > len(best_text):
+                        best_text = candidate
+        except (UnicodeDecodeError, struct.error):
+            continue
+
+    return best_text
