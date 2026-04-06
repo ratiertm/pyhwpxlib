@@ -2088,6 +2088,13 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
                         run = para.add_new_run()
                         run.char_pr_id_ref = get_char_pr_id(char_pos)
                         run._item_list.append(gso_obj)
+                elif ctrl_id == _CTRL_ID_FORM:
+                    sub_recs = _collect_sub_records(pg, ci)
+                    form_obj = _build_form_object(sub_recs, ctrl_rec, hwp)
+                    if form_obj is not None:
+                        run = para.add_new_run()
+                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        run._item_list.append(form_obj)
 
             # Reset char_pr for next segment
             current_char_pr = get_char_pr_id(char_pos)
@@ -3281,3 +3288,139 @@ def _extract_textart_text(sc_data: bytes) -> str:
             continue
 
     return best_text
+
+
+def _build_form_object(sub_records: List[dict], ctrl_rec: dict,
+                       hwp: '_HWPDocument') -> Optional[Any]:
+    """Build a form control object (Button, CheckButton, RadioButton, ComboBox, Edit)."""
+    from .objects.section.objects.form_objects import (
+        Button, CheckButton, RadioButton, ComboBox, Edit, FormCharPr,
+    )
+    from .objects.section.objects.drawing_object import ShapeSize, ShapePosition
+    from .objects.common.base_objects import LeftRightTopBottom
+    from .object_type import ObjectType
+
+    ctrl_data = ctrl_rec['data']
+    if len(ctrl_data) < 28:
+        return None
+
+    # Parse CTRL_HEADER common fields
+    gso_prop = struct.unpack_from('<I', ctrl_data, 4)[0]
+    y_offset = struct.unpack_from('<i', ctrl_data, 8)[0]
+    x_offset = struct.unpack_from('<i', ctrl_data, 12)[0]
+    width = struct.unpack_from('<I', ctrl_data, 16)[0]
+    height = struct.unpack_from('<I', ctrl_data, 20)[0]
+
+    # Determine form type from sub-records
+    # The form type is stored in the FormObject properties within the control data.
+    # We use heuristic: look for form type identifier in the data.
+    # Common form types in HWP: PushButton, CheckBox, RadioButton, ComboBox, Edit
+    form_type = _detect_form_type(ctrl_data, sub_records)
+
+    _FORM_TYPE_MAP = {
+        'push_button': Button,
+        'check_box': CheckButton,
+        'radio_button': RadioButton,
+        'combo_box': ComboBox,
+        'edit': Edit,
+    }
+
+    cls = _FORM_TYPE_MAP.get(form_type, Edit)  # default to Edit
+    obj = cls()
+
+    # Common form properties
+    obj.name = ""
+    obj.fore_color = "#000000"
+    obj.back_color = "#FFFFFF"
+    obj.group_name = ""
+    obj.tab_stop = True
+    obj.tab_order = 0
+    obj.enabled = True
+    obj.border_type_id_ref = ""
+    obj.draw_frame = False
+    obj.printable = True
+    obj.form_editable = True
+    obj.command = ""
+
+    obj.so_id = "0"
+    obj.z_order = 0
+    obj.text_wrap = "TOP_AND_BOTTOM"
+    obj.text_flow = "BOTH_SIDES"
+    obj.lock = False
+
+    obj.sz = ShapeSize()
+    obj.sz.width = width
+    obj.sz.height = height
+    obj.sz.width_rel_to = "ABSOLUTE"
+    obj.sz.height_rel_to = "ABSOLUTE"
+    obj.sz.protect = False
+
+    obj.pos = ShapePosition()
+    obj.pos.treat_as_char = bool(gso_prop & 0x01)
+    obj.pos.affect_line_spacing = bool(gso_prop & 0x02)
+    obj.pos.vert_rel_to = "PARA"
+    obj.pos.horz_rel_to = "COLUMN"
+    obj.pos.vert_align = "TOP"
+    obj.pos.horz_align = "LEFT"
+    obj.pos.vert_offset = y_offset
+    obj.pos.horz_offset = x_offset
+    obj.pos.flow_with_text = False
+    obj.pos.allow_overlap = True
+    obj.pos.hold_anchor_and_so = False
+
+    obj.out_margin = LeftRightTopBottom(ObjectType.hp_outMargin)
+
+    obj.form_char_pr = FormCharPr()
+    obj.form_char_pr.char_pr_id_ref = "0"
+
+    logger.info("GSO: built Form '%s' (%dx%d)", form_type, width, height)
+    return obj
+
+
+def _detect_form_type(ctrl_data: bytes, sub_records: List[dict]) -> str:
+    """Detect form control type from CTRL_HEADER data.
+
+    The form type is typically stored in the FormObject's property set.
+    We scan for known type identifiers.
+    """
+    # The form type byte is usually at a specific offset in the ctrl_data
+    # or in a sub-record. HWP stores form type as a byte:
+    # 0 = PushButton, 1 = RadioButton, 2 = CheckBox, 3 = ComboBox, 4 = Edit
+
+    # Strategy: scan all data for type patterns
+    all_data = ctrl_data
+    for rec in sub_records:
+        all_data += rec['data']
+
+    # Look for the FormObject type byte. In HWP binary format,
+    # it's typically in the LIST_HEADER sub-record.
+    # Try heuristic: scan for type strings in the property set
+    data_str = all_data.decode('ascii', errors='replace').lower()
+    if 'checkbox' in data_str or 'check' in data_str:
+        return 'check_box'
+    elif 'radiobutton' in data_str or 'radio' in data_str:
+        return 'radio_button'
+    elif 'combobox' in data_str or 'combo' in data_str:
+        return 'combo_box'
+    elif 'pushbutton' in data_str or 'push' in data_str:
+        return 'push_button'
+    elif 'edit' in data_str:
+        return 'edit'
+
+    # Fallback: check for UTF-16LE type strings
+    try:
+        data_utf16 = all_data.decode('utf-16-le', errors='replace').lower()
+        if 'checkbox' in data_utf16:
+            return 'check_box'
+        elif 'radiobutton' in data_utf16:
+            return 'radio_button'
+        elif 'combobox' in data_utf16:
+            return 'combo_box'
+        elif 'pushbutton' in data_utf16:
+            return 'push_button'
+        elif 'edit' in data_utf16:
+            return 'edit'
+    except Exception:
+        pass
+
+    return 'edit'  # default
