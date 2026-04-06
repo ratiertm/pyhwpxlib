@@ -2725,6 +2725,8 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
                         _GSO_TYPE_ARC, _GSO_TYPE_POLYGON, _GSO_TYPE_CURVE,
                         _GSO_TYPE_CONNECTLN, 0x246C6F63):
         return _build_drawing_object(shape_info, sc_type_id, hwp)
+    elif sc_type_id == _GSO_TYPE_OLE:
+        return _build_ole_object(shape_info, hwp)
     else:
         logger.debug("GSO: unsupported type 0x%08X, skipping", sc_type_id)
         return None
@@ -2996,3 +2998,64 @@ def _parse_sc_line_and_shadow(sc_data: bytes) -> tuple:
         pass
 
     return (line_shape, shadow)
+
+
+def _build_ole_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
+    """Build an OLE object from GSO sub-records."""
+    from .objects.section.objects.ole import OLE
+    from .objects.section.objects.drawing_object import ShapeSize, ShapePosition
+    from .objects.common.base_objects import LeftRightTopBottom, XAndY
+    from .object_type import ObjectType
+
+    ole = OLE()
+    ole.so_id = "0"
+    ole.z_order = shape_info['z_order']
+    ole.text_wrap = "TOP_AND_BOTTOM"
+    ole.text_flow = "BOTH_SIDES"
+    ole.lock = False
+
+    ole.sz = ShapeSize()
+    ole.sz.width = shape_info['width']
+    ole.sz.height = shape_info['height']
+    ole.sz.width_rel_to = "ABSOLUTE"
+    ole.sz.height_rel_to = "ABSOLUTE"
+    ole.sz.protect = False
+
+    ole.pos = ShapePosition()
+    ole.pos.treat_as_char = bool(shape_info['property'] & 0x01)
+    ole.pos.affect_line_spacing = bool(shape_info['property'] & 0x02)
+    ole.pos.vert_rel_to = "PARA"
+    ole.pos.horz_rel_to = "COLUMN"
+    ole.pos.vert_align = "TOP"
+    ole.pos.horz_align = "LEFT"
+    ole.pos.vert_offset = shape_info['y_offset']
+    ole.pos.horz_offset = shape_info['x_offset']
+    ole.pos.flow_with_text = False
+    ole.pos.allow_overlap = True
+    ole.pos.hold_anchor_and_so = False
+
+    ole.out_margin = LeftRightTopBottom(ObjectType.hp_outMargin)
+    ole.out_margin.left = shape_info['margin_left']
+    ole.out_margin.right = shape_info['margin_right']
+    ole.out_margin.top = shape_info['margin_top']
+    ole.out_margin.bottom = shape_info['margin_bottom']
+
+    # OLE-specific: try to find binDataId reference
+    sc_data = shape_info['sc_data']
+    bin_item_id = _find_bin_item_id_in_sc(sc_data, hwp)
+    if bin_item_id is not None:
+        ole.binary_item_id_ref = "bindata%d" % bin_item_id
+    else:
+        ole.binary_item_id_ref = ""
+
+    ole.ole_object_type = "EMBEDDED"
+    ole.has_moniker = False
+    ole.draw_aspect = "CONTENT"
+    ole.eq_base_line = 0
+
+    ole.extent = XAndY(ObjectType.hc_extent)
+    ole.extent.x = shape_info['width']
+    ole.extent.y = shape_info['height']
+
+    logger.info("GSO: built OLE (%dx%d)", shape_info['width'], shape_info['height'])
+    return ole
