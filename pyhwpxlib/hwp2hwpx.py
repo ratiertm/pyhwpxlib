@@ -2700,11 +2700,34 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
         'sub_records': sub_records,
     }
 
-    pic = _try_build_picture(shape_info, hwp)
-    if pic is not None:
-        return pic
+    # Determine GSO type from ShapeComponent first 4 bytes
+    sc_data = shape_comp_rec['data']
+    if len(sc_data) < 4:
+        return None
+    sc_type_id = struct.unpack_from('<I', sc_data, 0)[0]
 
-    return None
+    # Dispatch by GSO type
+    _GSO_TYPE_PICTURE   = 0x24706963  # '$pic'
+    _GSO_TYPE_RECTANGLE = 0x24726563  # '$rec'
+    _GSO_TYPE_ELLIPSE   = 0x24656C6C  # '$ell'
+    _GSO_TYPE_LINE      = 0x246C696E  # '$lin'
+    _GSO_TYPE_ARC       = 0x24617263  # '$arc'
+    _GSO_TYPE_POLYGON   = 0x24706F6C  # '$pol'
+    _GSO_TYPE_CURVE     = 0x24637572  # '$cur'
+    _GSO_TYPE_OLE       = 0x246F6C65  # '$ole'
+    _GSO_TYPE_CONTAINER = 0x24636F6E  # '$con'
+    _GSO_TYPE_CONNECTLN = 0x24636C6E  # '$cln'  or 0x246C6F63 '$loc'
+    _GSO_TYPE_TEXTART   = 0x24747841  # '$txA' or 0x24746174 '$tat'
+
+    if sc_type_id == _GSO_TYPE_PICTURE:
+        return _try_build_picture(shape_info, hwp)
+    elif sc_type_id in (_GSO_TYPE_RECTANGLE, _GSO_TYPE_ELLIPSE, _GSO_TYPE_LINE,
+                        _GSO_TYPE_ARC, _GSO_TYPE_POLYGON, _GSO_TYPE_CURVE,
+                        _GSO_TYPE_CONNECTLN, 0x246C6F63):
+        return _build_drawing_object(shape_info, sc_type_id, hwp)
+    else:
+        logger.debug("GSO: unsupported type 0x%08X, skipping", sc_type_id)
+        return None
 
 
 def _try_build_picture(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
@@ -2796,3 +2819,180 @@ def _find_bin_item_id_in_sc(sc_data: bytes, hwp: '_HWPDocument') -> Optional[int
         if candidate in known_ids:
             return candidate
     return None
+
+
+def _build_drawing_object(shape_info: dict, sc_type_id: int,
+                          hwp: '_HWPDocument') -> Optional[Any]:
+    """Build a drawing object (Rectangle, Ellipse, Line, Arc, Polygon, Curve, ConnectLine)."""
+    from .objects.section.objects.shapes import (
+        Rectangle, Ellipse, Line, Arc, Polygon, Curve,
+    )
+    from .objects.section.objects.connect_line import ConnectLine
+    from .objects.section.objects.drawing_object import (
+        ShapeSize, ShapePosition, DrawingShadow,
+    )
+    from .objects.section.objects.picture import LineShape
+    from .objects.common.base_objects import LeftRightTopBottom, Point
+    from .object_type import ObjectType
+
+    _TYPE_MAP = {
+        0x24726563: ('Rectangle', Rectangle),
+        0x24656C6C: ('Ellipse', Ellipse),
+        0x246C696E: ('Line', Line),
+        0x24617263: ('Arc', Arc),
+        0x24706F6C: ('Polygon', Polygon),
+        0x24637572: ('Curve', Curve),
+        0x24636C6E: ('ConnectLine', ConnectLine),
+        0x246C6F63: ('ConnectLine', ConnectLine),
+    }
+
+    type_info = _TYPE_MAP.get(sc_type_id)
+    if type_info is None:
+        return None
+
+    type_name, cls = type_info
+    obj = cls()
+
+    # ShapeObject common properties
+    obj.so_id = "0"
+    obj.z_order = shape_info['z_order']
+    obj.text_wrap = "TOP_AND_BOTTOM"
+    obj.text_flow = "BOTH_SIDES"
+    obj.lock = False
+
+    # Size
+    obj.sz = ShapeSize()
+    obj.sz.width = shape_info['width']
+    obj.sz.height = shape_info['height']
+    obj.sz.width_rel_to = "ABSOLUTE"
+    obj.sz.height_rel_to = "ABSOLUTE"
+    obj.sz.protect = False
+
+    # Position
+    obj.pos = ShapePosition()
+    obj.pos.treat_as_char = bool(shape_info['property'] & 0x01)
+    obj.pos.affect_line_spacing = bool(shape_info['property'] & 0x02)
+    obj.pos.vert_rel_to = "PARA"
+    obj.pos.horz_rel_to = "COLUMN"
+    obj.pos.vert_align = "TOP"
+    obj.pos.horz_align = "LEFT"
+    obj.pos.vert_offset = shape_info['y_offset']
+    obj.pos.horz_offset = shape_info['x_offset']
+    obj.pos.flow_with_text = False
+    obj.pos.allow_overlap = True
+    obj.pos.hold_anchor_and_so = False
+
+    # Out margins
+    obj.out_margin = LeftRightTopBottom(ObjectType.hp_outMargin)
+    obj.out_margin.left = shape_info['margin_left']
+    obj.out_margin.right = shape_info['margin_right']
+    obj.out_margin.top = shape_info['margin_top']
+    obj.out_margin.bottom = shape_info['margin_bottom']
+
+    # Parse ShapeComponent for lineInfo, fillInfo, shadowInfo
+    sc_data = shape_info['sc_data']
+    line_shape, shadow = _parse_sc_line_and_shadow(sc_data)
+    if line_shape is not None:
+        obj.line_shape = line_shape
+    if shadow is not None:
+        obj.shadow = shadow
+
+    # Type-specific geometry (corner points for rect, etc.)
+    w, h = shape_info['width'], shape_info['height']
+    if type_name == 'Rectangle' and hasattr(obj, 'create_pt0'):
+        obj.pt0 = Point(ObjectType.hc_pt0)
+        obj.pt0.x, obj.pt0.y = 0, 0
+        obj.pt1 = Point(ObjectType.hc_pt1)
+        obj.pt1.x, obj.pt1.y = w, 0
+        obj.pt2 = Point(ObjectType.hc_pt2)
+        obj.pt2.x, obj.pt2.y = w, h
+        obj.pt3 = Point(ObjectType.hc_pt3)
+        obj.pt3.x, obj.pt3.y = 0, h
+    elif type_name == 'Line' and hasattr(obj, 'start_pt'):
+        obj.start_pt = Point(ObjectType.hc_startPt)
+        obj.start_pt.x, obj.start_pt.y = 0, 0
+        obj.end_pt = Point(ObjectType.hc_endPt)
+        obj.end_pt.x, obj.end_pt.y = w, h
+    elif type_name == 'Ellipse':
+        if hasattr(obj, 'create_center'):
+            obj.center = Point(ObjectType.hc_center)
+            obj.center.x, obj.center.y = w // 2, h // 2
+            obj.ax1 = Point(ObjectType.hc_ax1)
+            obj.ax1.x, obj.ax1.y = w, h // 2
+            obj.ax2 = Point(ObjectType.hc_ax2)
+            obj.ax2.x, obj.ax2.y = w // 2, h
+
+    logger.info("GSO: built %s (%dx%d)", type_name, w, h)
+    return obj
+
+
+def _parse_sc_line_and_shadow(sc_data: bytes) -> tuple:
+    """Parse LineInfo and ShadowInfo from ShapeComponent binary data.
+
+    Returns (LineShape or None, DrawingShadow or None).
+    """
+    from .objects.section.objects.picture import LineShape
+    from .objects.section.objects.drawing_object import DrawingShadow
+
+    # ShapeComponent layout after type_id (4 bytes):
+    #   offset_x(4) + offset_y(4) + orgSz_w(4) + orgSz_h(4) +
+    #   curSz_w(4) + curSz_h(4) + flip(4) + rotation_angle(2) +
+    #   rotation_cx(2) + rotation_cy(2) + renderingInfo(varies)
+    # Then for ShapeComponentNormal:
+    #   instid(4) + lineInfo + fillInfo + shadowInfo
+    #
+    # LineInfo: color(4) + thickness(4) + property(4) + outlineStyle(1) = 13 bytes min
+    # ShadowInfo: type(4) + color(4) + offsetX(4) + offsetY(4) + transparent(2) = 18 bytes
+
+    # Due to variable-length renderingInfo, we use heuristic offset scanning
+    # LineInfo color is typically an RGB value (0x00RRGGBB pattern)
+    # We look for the LineInfo structure starting after the common fields
+
+    line_shape = None
+    shadow = None
+
+    # Minimum offset where lineInfo could start (after type_id + common fields)
+    # type(4) + x(4) + y(4) + ow(4) + oh(4) + cw(4) + ch(4) + flip(4) + rot(6) = 38
+    # Plus possible rendering matrices (6*8 = 48 per matrix, up to 3 matrices)
+    # instid(4) before lineInfo
+
+    if len(sc_data) < 55:
+        return (None, None)
+
+    # Try to find lineInfo by scanning for a reasonable line thickness value
+    # followed by a property uint32. Line thickness is typically 0-1000 range.
+    # Color is 4 bytes (0x00RRGGBB).
+
+    # Simplified: just extract basic line info if data is long enough
+    # We'll improve this in later phases with proper offset calculation
+    try:
+        # Heuristic: look for a pattern of color(4)+thickness(4) where
+        # thickness is in range 0-5000 (HWP units) starting after offset 38
+        for off in range(38, min(len(sc_data) - 13, 200)):
+            color_val = struct.unpack_from('<I', sc_data, off)[0]
+            thickness = struct.unpack_from('<I', sc_data, off + 4)[0]
+            prop_val = struct.unpack_from('<I', sc_data, off + 8)[0]
+
+            # Heuristic checks: color should be <= 0x00FFFFFF,
+            # thickness 1-5000, prop reasonable
+            if (0 < thickness <= 5000 and
+                color_val <= 0x00FFFFFF and
+                prop_val <= 0xFFFF):
+                line_shape = LineShape()
+                r = (color_val >> 16) & 0xFF
+                g = (color_val >> 8) & 0xFF
+                b = color_val & 0xFF
+                line_shape.color = "#%02X%02X%02X" % (r, g, b)
+                line_shape.width = thickness
+                line_type = prop_val & 0x1F
+                _LINE_TYPES = {
+                    0: "SOLID", 1: "DASH", 2: "DOT", 3: "DASH_DOT",
+                    4: "DASH_DOT_DOT", 5: "LONG_DASH", 6: "CIRCLE",
+                }
+                line_shape.type = _LINE_TYPES.get(line_type, "SOLID")
+                line_shape.style = "NORMAL"
+                break
+    except (struct.error, IndexError):
+        pass
+
+    return (line_shape, shadow)
