@@ -1551,7 +1551,13 @@ def _group_paragraphs(records: List[dict]) -> List[List[dict]]:
 # Control type ID for table in control records (first 4 bytes of data).
 # In HWP 5.x binary, extended controls (section def, column def, table, etc.)
 # use tag 71 (LIST_HEADER) with a 4-byte control ID at the start of the data.
-_CTRL_ID_TABLE = 0x74626C20  # bytes ' lbt' read as uint32-LE
+_CTRL_ID_TABLE = 0x74626C20     # 'tbl '
+_CTRL_ID_GSO = 0x67736F20       # 'gso '
+_CTRL_ID_EQUATION = 0x65716564  # 'eqed'
+_CTRL_ID_FORM = 0x666F726D      # 'form'
+
+# GSO shape type IDs (from ShapeComponent first 4 bytes in sub-records)
+_TAG_SHAPE_COMPONENT = 76  # HWPTAG_BEGIN + 60
 
 # Tag used for extended control records (section/column/table/etc.) in actual HWP files.
 # CTRL_HEADER (tag 71) records whose first 4 bytes identify the control type.
@@ -1583,12 +1589,21 @@ def _find_ctrl_headers_in_group(pg: List[dict]) -> List[int]:
     return indices
 
 
+def _get_ctrl_id(rec_data: bytes) -> int:
+    """Get the control type ID from the first 4 bytes of a CTRL_HEADER record."""
+    if len(rec_data) < 4:
+        return 0
+    return struct.unpack_from('<I', rec_data, 0)[0]
+
+
 def _is_table_ctrl(rec_data: bytes) -> bool:
     """Check whether an extended control record is for a table."""
-    if len(rec_data) < 4:
-        return False
-    ctrl_id = struct.unpack_from('<I', rec_data, 0)[0]
-    return ctrl_id == _CTRL_ID_TABLE
+    return _get_ctrl_id(rec_data) == _CTRL_ID_TABLE
+
+
+def _is_gso_ctrl(rec_data: bytes) -> bool:
+    """Check whether an extended control record is for a GSO (drawing object)."""
+    return _get_ctrl_id(rec_data) == _CTRL_ID_GSO
 
 
 def _collect_sub_records(pg: List[dict], ctrl_idx: int) -> List[dict]:
@@ -2059,13 +2074,20 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
 
             if ci is not None and ch == _CH_TABLE:
                 ctrl_rec = pg[ci]
-                if _is_table_ctrl(ctrl_rec['data']):
+                ctrl_id = _get_ctrl_id(ctrl_rec['data'])
+                if ctrl_id == _CTRL_ID_TABLE:
                     sub_recs = _collect_sub_records(pg, ci)
                     tbl = _build_table_object(sub_recs, ctrl_rec, hwp)
-                    # Add table in its own run
                     run = para.add_new_run()
                     run.char_pr_id_ref = get_char_pr_id(char_pos)
                     run._item_list.append(tbl)
+                elif ctrl_id == _CTRL_ID_GSO:
+                    sub_recs = _collect_sub_records(pg, ci)
+                    gso_obj = _build_gso_object(sub_recs, ctrl_rec, hwp)
+                    if gso_obj is not None:
+                        run = para.add_new_run()
+                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        run._item_list.append(gso_obj)
 
             # Reset char_pr for next segment
             current_char_pr = get_char_pr_id(char_pos)
@@ -2631,3 +2653,146 @@ def _build_text_runs(para, chars: List[Tuple[int, int]],
         run = para.add_new_run()
         run.char_pr_id_ref = "0"
         run.add_new_t()
+
+
+# ============================================================
+# GSO (Graphic Shape Object) Builders
+# ============================================================
+
+def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
+                      hwp: '_HWPDocument') -> Optional[Any]:
+    """Build a GSO object from CTRL_HEADER + sub-records."""
+    ctrl_data = ctrl_rec['data']
+    if len(ctrl_data) < 28:
+        return None
+
+    gso_prop = struct.unpack_from('<I', ctrl_data, 4)[0]
+    y_offset = struct.unpack_from('<i', ctrl_data, 8)[0]
+    x_offset = struct.unpack_from('<i', ctrl_data, 12)[0]
+    width = struct.unpack_from('<I', ctrl_data, 16)[0]
+    height = struct.unpack_from('<I', ctrl_data, 20)[0]
+    z_order = struct.unpack_from('<i', ctrl_data, 24)[0]
+
+    margin_left = margin_right = margin_top = margin_bottom = 0
+    if len(ctrl_data) >= 44:
+        margin_left = struct.unpack_from('<i', ctrl_data, 28)[0]
+        margin_right = struct.unpack_from('<i', ctrl_data, 32)[0]
+        margin_top = struct.unpack_from('<i', ctrl_data, 36)[0]
+        margin_bottom = struct.unpack_from('<i', ctrl_data, 40)[0]
+
+    shape_comp_rec = None
+    for rec in sub_records:
+        if rec['tag'] == _TAG_SHAPE_COMPONENT:
+            shape_comp_rec = rec
+            break
+
+    if shape_comp_rec is None:
+        return None
+
+    shape_info = {
+        'property': gso_prop,
+        'x_offset': x_offset, 'y_offset': y_offset,
+        'width': width, 'height': height,
+        'z_order': z_order,
+        'margin_left': margin_left, 'margin_right': margin_right,
+        'margin_top': margin_top, 'margin_bottom': margin_bottom,
+        'sc_data': shape_comp_rec['data'],
+        'sub_records': sub_records,
+    }
+
+    pic = _try_build_picture(shape_info, hwp)
+    if pic is not None:
+        return pic
+
+    return None
+
+
+def _try_build_picture(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
+    """Try to build a Picture object if the GSO contains an image reference."""
+    from .objects.section.objects.picture import Picture, ImageRect, ImageDim
+    from .objects.header.references.border_fill import Image
+    from .objects.section.objects.drawing_object import ShapeSize, ShapePosition
+    from .objects.common.base_objects import LeftRightTopBottom, Point
+    from .object_type import ObjectType
+
+    sc_data = shape_info['sc_data']
+    if len(sc_data) < 60:
+        return None
+
+    bin_item_id = _find_bin_item_id_in_sc(sc_data, hwp)
+    if bin_item_id is None:
+        return None
+
+    bin_ref = hwp.bin_data_ids.get(bin_item_id)
+    if bin_ref is None:
+        return None
+
+    pic = Picture()
+    pic.instid = "0"
+    pic.reverse = False
+    pic.so_id = "0"
+    pic.z_order = shape_info['z_order']
+    pic.text_wrap = "TOP_AND_BOTTOM"
+    pic.text_flow = "BOTH_SIDES"
+    pic.lock = False
+
+    pic.sz = ShapeSize()
+    pic.sz.width = shape_info['width']
+    pic.sz.height = shape_info['height']
+    pic.sz.width_rel_to = "ABSOLUTE"
+    pic.sz.height_rel_to = "ABSOLUTE"
+    pic.sz.protect = False
+
+    pic.pos = ShapePosition()
+    pic.pos.treat_as_char = bool(shape_info['property'] & 0x01)
+    pic.pos.affect_line_spacing = bool(shape_info['property'] & 0x02)
+    pic.pos.vert_rel_to = "PARA"
+    pic.pos.horz_rel_to = "COLUMN"
+    pic.pos.vert_align = "TOP"
+    pic.pos.horz_align = "LEFT"
+    pic.pos.vert_offset = shape_info['y_offset']
+    pic.pos.horz_offset = shape_info['x_offset']
+    pic.pos.flow_with_text = False
+    pic.pos.allow_overlap = True
+    pic.pos.hold_anchor_and_so = False
+
+    pic.out_margin = LeftRightTopBottom(ObjectType.hp_outMargin)
+    pic.out_margin.left = shape_info['margin_left']
+    pic.out_margin.right = shape_info['margin_right']
+    pic.out_margin.top = shape_info['margin_top']
+    pic.out_margin.bottom = shape_info['margin_bottom']
+
+    w, h = shape_info['width'], shape_info['height']
+    pic.img_dim = ImageDim()
+    pic.img_dim.width = w
+    pic.img_dim.height = h
+
+    pic.img_rect = ImageRect()
+    pic.img_rect.pt0 = Point(ObjectType.hc_pt0)
+    pic.img_rect.pt0.x, pic.img_rect.pt0.y = 0, 0
+    pic.img_rect.pt1 = Point(ObjectType.hc_pt1)
+    pic.img_rect.pt1.x, pic.img_rect.pt1.y = w, 0
+    pic.img_rect.pt2 = Point(ObjectType.hc_pt2)
+    pic.img_rect.pt2.x, pic.img_rect.pt2.y = w, h
+    pic.img_rect.pt3 = Point(ObjectType.hc_pt3)
+    pic.img_rect.pt3.x, pic.img_rect.pt3.y = 0, h
+
+    pic.img = Image()
+    pic.img.binaryItemIDRef = f"bindata{bin_item_id}"
+    pic.img.bright = 0
+    pic.img.contrast = 0
+
+    logger.info("GSO: built Picture with binItemID=%d", bin_item_id)
+    return pic
+
+
+def _find_bin_item_id_in_sc(sc_data: bytes, hwp: '_HWPDocument') -> Optional[int]:
+    """Scan ShapeComponent data to find a binItemID matching known bin_data_ids."""
+    known_ids = set(hwp.bin_data_ids.keys())
+    if not known_ids:
+        return None
+    for offset in range(30, min(len(sc_data) - 1, 200), 2):
+        candidate = struct.unpack_from('<H', sc_data, offset)[0]
+        if candidate in known_ids:
+            return candidate
+    return None
