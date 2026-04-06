@@ -2727,6 +2727,8 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
         return _build_drawing_object(shape_info, sc_type_id, hwp)
     elif sc_type_id == _GSO_TYPE_OLE:
         return _build_ole_object(shape_info, hwp)
+    elif sc_type_id == _GSO_TYPE_CONTAINER:
+        return _build_container_object(shape_info, hwp)
     else:
         logger.debug("GSO: unsupported type 0x%08X, skipping", sc_type_id)
         return None
@@ -3059,3 +3061,114 @@ def _build_ole_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
 
     logger.info("GSO: built OLE (%dx%d)", shape_info['width'], shape_info['height'])
     return ole
+
+
+def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
+    """Build a Container (group) object with recursive child GSO objects."""
+    from .objects.section.objects.ole import Container
+    from .objects.section.objects.drawing_object import ShapeSize, ShapePosition
+    from .objects.common.base_objects import LeftRightTopBottom
+    from .object_type import ObjectType
+
+    container = Container()
+    container.so_id = "0"
+    container.z_order = shape_info['z_order']
+    container.text_wrap = "TOP_AND_BOTTOM"
+    container.text_flow = "BOTH_SIDES"
+    container.lock = False
+
+    container.sz = ShapeSize()
+    container.sz.width = shape_info['width']
+    container.sz.height = shape_info['height']
+    container.sz.width_rel_to = "ABSOLUTE"
+    container.sz.height_rel_to = "ABSOLUTE"
+    container.sz.protect = False
+
+    container.pos = ShapePosition()
+    container.pos.treat_as_char = bool(shape_info['property'] & 0x01)
+    container.pos.affect_line_spacing = bool(shape_info['property'] & 0x02)
+    container.pos.vert_rel_to = "PARA"
+    container.pos.horz_rel_to = "COLUMN"
+    container.pos.vert_align = "TOP"
+    container.pos.horz_align = "LEFT"
+    container.pos.vert_offset = shape_info['y_offset']
+    container.pos.horz_offset = shape_info['x_offset']
+    container.pos.flow_with_text = False
+    container.pos.allow_overlap = True
+    container.pos.hold_anchor_and_so = False
+
+    container.out_margin = LeftRightTopBottom(ObjectType.hp_outMargin)
+    container.out_margin.left = shape_info['margin_left']
+    container.out_margin.right = shape_info['margin_right']
+    container.out_margin.top = shape_info['margin_top']
+    container.out_margin.bottom = shape_info['margin_bottom']
+
+    # Find child SHAPE_COMPONENT records (level = container SC level + 1)
+    sub_records = shape_info['sub_records']
+    sc_data = shape_info['sc_data']
+
+    # The container's own ShapeComponent is the first one (level N).
+    # Child ShapeComponents are at level N+1.
+    # We already have sub_records which are all records after CTRL_HEADER.
+    # The container SC is the first SHAPE_COMPONENT in sub_records.
+    # Children are subsequent SHAPE_COMPONENTs at a deeper level.
+
+    container_sc_level = None
+    child_sc_records = []
+
+    for rec in sub_records:
+        if rec['tag'] == _TAG_SHAPE_COMPONENT:
+            if container_sc_level is None:
+                # This is the container's own SC
+                container_sc_level = rec.get('level', 0)
+            else:
+                # This is a child SC (should be container_sc_level + 1)
+                if rec.get('level', 0) > container_sc_level:
+                    child_sc_records.append(rec)
+
+    child_count = 0
+    for child_rec in child_sc_records:
+        child_data = child_rec['data']
+        if len(child_data) < 4:
+            continue
+
+        child_type_id = struct.unpack_from('<I', child_data, 0)[0]
+
+        # Build child shape_info (reuse parent's position info as base)
+        child_info = {
+            'property': shape_info['property'],
+            'x_offset': 0, 'y_offset': 0,
+            'width': shape_info['width'],
+            'height': shape_info['height'],
+            'z_order': 0,
+            'margin_left': 0, 'margin_right': 0,
+            'margin_top': 0, 'margin_bottom': 0,
+            'sc_data': child_data,
+            'sub_records': [],  # Children don't have sub-records in this model
+        }
+
+        # Try to extract width/height from child ShapeComponent
+        # Layout: type_id(4) + x(4) + y(4) + orgW(4) + orgH(4) + curW(4) + curH(4)
+        if len(child_data) >= 28:
+            child_info['width'] = struct.unpack_from('<I', child_data, 20)[0]
+            child_info['height'] = struct.unpack_from('<I', child_data, 24)[0]
+
+        _GSO_TYPE_PICTURE   = 0x24706963
+        _GSO_TYPE_OLE       = 0x246F6C65
+        _DRAWING_TYPES = {0x24726563, 0x24656C6C, 0x246C696E, 0x24617263,
+                          0x24706F6C, 0x24637572, 0x24636C6E, 0x246C6F63}
+
+        child_obj = None
+        if child_type_id == _GSO_TYPE_PICTURE:
+            child_obj = _try_build_picture(child_info, hwp)
+        elif child_type_id in _DRAWING_TYPES:
+            child_obj = _build_drawing_object(child_info, child_type_id, hwp)
+        elif child_type_id == _GSO_TYPE_OLE:
+            child_obj = _build_ole_object(child_info, hwp)
+
+        if child_obj is not None:
+            container.add_child(child_obj)
+            child_count += 1
+
+    logger.info("GSO: built Container with %d children", child_count)
+    return container
