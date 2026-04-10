@@ -286,6 +286,43 @@ pyhwpxlib validate output.hwpx                  # 구조 검증
 
 ---
 
+## 미리보기 (HWP/HWPX → SVG)
+
+HWP 또는 HWPX 문서를 SVG로 렌더링해 시각적으로 확인하거나 LLM이 검토하게 할 수 있습니다:
+
+```bash
+pip install pyhwpxlib[preview]
+```
+
+```python
+from pyhwpxlib.rhwp_bridge import RhwpEngine
+
+engine = RhwpEngine()  # WASM 1회 로드
+with engine.load("sample.hwp") as doc:   # HWP / HWPX 둘 다
+    print(doc.page_count)
+    svg = doc.render_page_svg(0)
+    all_svgs = doc.render_all_svgs()
+```
+
+macOS에서 한글 폰트 측정을 더 정확히 하려면 Pillow도 함께 설치:
+
+```bash
+pip install pyhwpxlib[preview-fonts]
+```
+
+이 기능은 LLM이 HWPX 문서를 생성한 뒤 결과물을 시각적으로 검증해야 하는
+워크플로에 특히 유용합니다.
+
+### 서드파티 고지
+
+미리보기 기능은 [rhwp 프로젝트](https://github.com/edwardkim/rhwp)에서
+빌드된 WebAssembly 바이너리를 번들로 포함합니다 (MIT License,
+© 2025-2026 Edward Kim). 바이너리는 수정 없이 재배포됩니다.
+자세한 내용은 [`NOTICE.md`](NOTICE.md)와 `pyhwpxlib/vendor/LICENSE.rhwp.txt`
+를 참조하세요.
+
+---
+
 ## HWPX 포맷이란?
 
 HWPX는 한컴오피스의 차세대 문서 포맷입니다. ZIP 안에 XML 파일이 들어있는 구조로, Microsoft Word의 `.docx`와 비슷한 개념입니다. 한국 공공기관과 기업에서 표준으로 사용됩니다.
@@ -297,11 +334,12 @@ HWPX는 한컴오피스의 차세대 문서 포맷입니다. ZIP 안에 XML 파�
 | [hwp2hwpx](https://github.com/neolord0/hwp2hwpx) | neolord0 | Apache 2.0 | HWP→HWPX 변환 로직 (Python 포팅) |
 | [hwplib](https://github.com/neolord0/hwplib) | neolord0 | Apache 2.0 | HWP 바이너리 파서 (Python 포팅) |
 | [python-hwpx](https://github.com/airmang/python-hwpx) | 고규현 | MIT | HWPX 데이터클래스 모델 |
+| [rhwp](https://github.com/edwardkim/rhwp) | Edward Kim | MIT | HWP/HWPX → SVG 렌더러 (WASM 번들, `[preview]` extras) |
 
 ## 알려진 한계
 
 - 복잡한 셀 병합 레이아웃은 수동 검토 필요
-- HWPX 렌더링 미리보기 미지원 (한컴오피스에서 직접 확인)
+- ~~HWPX 렌더링 미리보기 미지원~~ → **v0.2.0부터 `[preview]` 지원**
 - CSS→HWPX 매핑은 주요 속성 46개만 지원
 - 이미지 내 텍스트 인식(OCR)은 별도 API 키 필요
 

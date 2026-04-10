@@ -1,0 +1,14 @@
+# Root-level legal and meta files
+include LICENSE
+include NOTICE.md
+include CHANGELOG.md
+include README.md
+include README_KO.md
+
+# Bundled vendor files (redundant with package-data for wheel, required for sdist)
+recursive-include pyhwpxlib/vendor *
+
+# Exclude caches and build artifacts
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store

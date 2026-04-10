@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyhwpxlib"
-version = "0.1.1"
-description = "Python library for creating and editing HWPX (Hancom Office) documents without Hancom Office"
+version = "0.2.0"
+description = "Python library for creating, editing, and previewing HWPX (Hancom Office) documents without Hancom Office"
 readme = "README.md"
 license = "BUSL-1.1 AND Apache-2.0"
 requires-python = ">=3.8"
@@ -29,7 +29,14 @@ dependencies = []
 images = ["Pillow>=9.0"]
 lxml = ["lxml>=4.9"]
 hwp = ["olefile>=0.46"]
-all = ["Pillow>=9.0", "lxml>=4.9", "olefile>=0.46"]
+preview = ["wasmtime>=25.0"]
+preview-fonts = ["wasmtime>=25.0", "Pillow>=9.0"]
+all = [
+    "Pillow>=9.0",
+    "lxml>=4.9",
+    "olefile>=0.46",
+    "wasmtime>=25.0",
+]
 
 [project.scripts]
 pyhwpxlib = "pyhwpxlib.cli:main"
@@ -44,4 +51,10 @@ where = ["."]
 include = ["pyhwpxlib*"]
 
 [tool.setuptools.package-data]
-pyhwpxlib = ["tools/*.hwpx", "tools/*.xml"]
+pyhwpxlib = [
+    "tools/*.hwpx",
+    "tools/*.xml",
+    "vendor/*.wasm",
+    "vendor/LICENSE*",
+    "vendor/NOTICE*",
+]

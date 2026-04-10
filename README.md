@@ -271,6 +271,42 @@ pyhwpxlib validate output.hwpx                  # Validate structure
 
 ---
 
+## Preview (HWP/HWPX → SVG)
+
+Render HWP or HWPX documents to SVG for visual inspection or LLM review:
+
+```bash
+pip install pyhwpxlib[preview]
+```
+
+```python
+from pyhwpxlib.rhwp_bridge import RhwpEngine
+
+engine = RhwpEngine()  # one-time WASM load
+with engine.load("sample.hwp") as doc:   # HWP or HWPX
+    print(doc.page_count)
+    svg = doc.render_page_svg(0)
+    all_svgs = doc.render_all_svgs()
+```
+
+For accurate Korean text measurement on macOS, install Pillow as well:
+
+```bash
+pip install pyhwpxlib[preview-fonts]
+```
+
+The preview feature is ideal for LLM-in-the-loop workflows where a language
+model generates an HWPX document and needs to visually verify the output.
+
+### Third-Party Notice
+
+The preview feature bundles a pre-built WebAssembly binary from the
+[rhwp project](https://github.com/edwardkim/rhwp) (MIT License,
+© 2025-2026 Edward Kim). The binary is redistributed unmodified. See
+[`NOTICE.md`](NOTICE.md) and `pyhwpxlib/vendor/LICENSE.rhwp.txt` for details.
+
+---
+
 ## What is HWPX?
 
 HWPX is the modern document format for Hancom Office, the standard office suite in South Korea. It's a ZIP archive containing XML files (OWPML spec) -- similar to `.docx` for Microsoft Word. Used by Korean government agencies, public institutions, and enterprises.
@@ -282,6 +318,7 @@ HWPX is the modern document format for Hancom Office, the standard office suite 
 | [hwp2hwpx](https://github.com/neolord0/hwp2hwpx) | neolord0 | Apache 2.0 | HWP→HWPX conversion (ported to Python) |
 | [hwplib](https://github.com/neolord0/hwplib) | neolord0 | Apache 2.0 | HWP binary parser (ported to Python) |
 | [python-hwpx](https://github.com/airmang/python-hwpx) | Kyuhyun Ko | MIT | HWPX dataclass model |
+| [rhwp](https://github.com/edwardkim/rhwp) | Edward Kim | MIT | HWP/HWPX → SVG renderer (bundled WASM, `[preview]` extras) |
 
 ## Known Limitations
 
