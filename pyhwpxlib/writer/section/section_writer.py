@@ -986,6 +986,12 @@ def _write_drawing_object(xsb: XMLStringBuilder, elem_name: str, obj: Any) -> No
     if dt is not None:
         _write_draw_text(xsb, dt)
 
+    # 6b) Container child shapes (hp:container only)
+    child_list = getattr(obj, "_child_list", None)
+    if child_list:
+        for child in child_list:
+            _write_run_item(xsb, child)
+
     # 7) Shape object children LAST (sz, pos, outMargin)
     _write_shape_object_children(xsb, obj)
 
