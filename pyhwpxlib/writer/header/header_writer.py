@@ -343,19 +343,24 @@ def _write_para_pr(xsb: XMLStringBuilder, pp: Any) -> None:
         xsb.attribute(AN.eAsianNum, asp.eAsianNum if hasattr(asp, "eAsianNum") else getattr(asp, "e_asian_num", None))
         xsb.close_element()
 
-    # Margin
+    # Margin + LineSpacing must be wrapped in <hp:switch><hp:default> so that
+    # HWPX readers (including rhwp) correctly apply indentation and line spacing.
+    # Original HWPX files from Hancom always use this wrapper.
     mg = getattr(pp, "margin", None)
-    if mg is not None:
-        _write_para_margin(xsb, mg)
-
-    # LineSpacing
     ls = getattr(pp, "lineSpacing", getattr(pp, "line_spacing", None))
-    if ls is not None:
-        xsb.open_element(EN.hh_lineSpacing)
-        xsb.attribute(AN.type, ls.type)
-        xsb.attribute(AN.value, ls.value)
-        xsb.attribute(AN.unit, ls.unit)
-        xsb.close_element()
+    if mg is not None or ls is not None:
+        xsb.open_element(EN.hp_switch)
+        xsb.open_element(EN.hp_default)
+        if mg is not None:
+            _write_para_margin(xsb, mg)
+        if ls is not None:
+            xsb.open_element(EN.hh_lineSpacing)
+            xsb.attribute(AN.type, ls.type)
+            xsb.attribute(AN.value, ls.value)
+            xsb.attribute(AN.unit, ls.unit)
+            xsb.close_element()
+        xsb.close_element()  # hp:default
+        xsb.close_element()  # hp:switch
 
     # Border
     bd = getattr(pp, "border", None)

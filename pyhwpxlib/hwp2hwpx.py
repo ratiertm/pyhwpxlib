@@ -2322,7 +2322,15 @@ def build_sec_pr_for_section(run, hwp: _HWPDocument, records: List[dict]):
         landscape_val = prop & 0x01
 
         # HWPX enum: WIDELY = portrait, NARROWLY = landscape
-        page_pr.landscape = PageDirection.NARROWLY if landscape_val else PageDirection.WIDELY
+        # HWP stores paper-orientation dimensions (short x long) regardless of
+        # landscape flag; HWPX expects actual display dimensions (width > height
+        # when landscape).  Swap so the viewer renders the page correctly.
+        if landscape_val:
+            page_pr.landscape = PageDirection.NARROWLY
+            if width < height:
+                width, height = height, width
+        else:
+            page_pr.landscape = PageDirection.WIDELY
         page_pr.width = width
         page_pr.height = height
         page_pr.gutter_type = GutterMethod.LEFT_ONLY
