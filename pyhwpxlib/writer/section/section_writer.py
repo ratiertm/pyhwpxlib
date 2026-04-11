@@ -214,7 +214,11 @@ def _write_t_item(xsb: XMLStringBuilder, item: Any) -> None:
         xsb.attribute(AN.width, item.width)
         leader = getattr(item, "leader", None)
         if leader is not None:
-            xsb.attribute_index(AN.leader, leader)
+            # LineType2 stores its ordinal in .index (int attr, not callable)
+            if hasattr(leader, "index") and not callable(leader.index):
+                xsb.attribute(AN.leader, str(leader.index))
+            else:
+                xsb.attribute_index(AN.leader, leader)
         tab_type = getattr(item, "type", None)
         if tab_type is not None:
             xsb.attribute_index(AN.type, tab_type)

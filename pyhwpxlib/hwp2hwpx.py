@@ -65,6 +65,11 @@ _CH_HYPHEN = 24
 # Extended control char codes (occupy 8 wchars total)
 _EXTENDED_CHARS = set(range(1, 32)) - {_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END}
 
+# HWP tab-fill sentinel value injected by _preprocess_chars() to signal that
+# the following TAB element should carry a DOT leader.  The actual HWP fill
+# character is a CJK ideograph (varies per paragraph) followed by U+0000.
+_CH_TAB_FILL_SENTINEL = 0x0001  # a low control code safely unused elsewhere
+
 
 # ============================================================
 # Public API
@@ -492,21 +497,47 @@ class _HWPDocument:
         return results
 
     def _read_tab_defs(self) -> List[dict]:
-        """Read HWPTAG_TAB_DEF records."""
+        """Read HWPTAG_TAB_DEF records.
+
+        Binary layout (HWP 5.x spec):
+          offset 0 : UINT32 flags  (bit0=autoTabLeft, bit1=autoTabRight)
+          offset 4 : UINT16 count  (number of tab items)
+          offset 6 : tab items, 8 bytes each:
+            +0 INT32  position (HWPUNIT)
+            +4 UINT8  type   (0=LEFT,1=RIGHT,2=CENTER,3=DECIMAL,4=BAR)
+            +5 UINT8  leader (0=NONE,1=DOT,2=DOT_SPACE,3=UNDER,4=EQUAL,5=THICK)
+            +6 UINT16 reserved
+        """
         results = []
         for rec in self.docinfo_records:
             if rec['tag'] == _TAG_TAB_DEF:
                 d = rec['data']
                 auto_tab_left = False
                 auto_tab_right = False
+                tab_items = []
                 if len(d) >= 4:
                     prop = struct.unpack_from('<I', d, 0)[0]
                     auto_tab_left = bool(prop & 0x01)
                     auto_tab_right = bool(prop & 0x02)
+                if len(d) >= 6:
+                    count = struct.unpack_from('<H', d, 4)[0]
+                    pos = 6
+                    for _ in range(count):
+                        if pos + 8 > len(d):
+                            break
+                        item_pos = struct.unpack_from('<i', d, pos)[0]
+                        item_type = d[pos + 4]
+                        item_leader = d[pos + 5]
+                        tab_items.append({
+                            'pos': item_pos,
+                            'type': item_type,
+                            'leader': item_leader,
+                        })
+                        pos += 8
                 results.append({
                     'auto_tab_left': auto_tab_left,
                     'auto_tab_right': auto_tab_right,
-                    'raw': d,
+                    'tab_items': tab_items,
                 })
         return results
 
@@ -1269,6 +1300,26 @@ def _line_type3_str(val: int) -> str:
 # ============================================================
 
 def _build_tab_properties(ref_list, hwp: _HWPDocument):
+    from .objects.header.enum_types import LineType2, TabItemType, ValueUnit2
+
+    # HWP leader byte → HWPX LineType2
+    _LEADER_MAP = {
+        0: LineType2.NONE,
+        1: LineType2.DOT,
+        2: LineType2.DOT,        # DOT_SPACE → DOT (closest)
+        3: LineType2.SOLID,      # UNDERSCORE → SOLID
+        4: LineType2.DASH,       # EQUAL → DASH (closest)
+        5: LineType2.SOLID,      # THICK_LINE → SOLID
+    }
+    # HWP type byte → HWPX TabItemType
+    _TYPE_MAP = {
+        0: TabItemType.LEFT,
+        1: TabItemType.RIGHT,
+        2: TabItemType.CENTER,
+        3: TabItemType.DECIMAL,
+        4: TabItemType.LEFT,     # BAR → LEFT (not in HWPX)
+    }
+
     tp_list = ref_list.create_tab_properties()
 
     if not hwp.tab_defs:
@@ -1284,6 +1335,13 @@ def _build_tab_properties(ref_list, hwp: _HWPDocument):
         tp.id = str(idx)
         tp.autoTabLeft = td.get('auto_tab_left', False)
         tp.autoTabRight = td.get('auto_tab_right', False)
+
+        for raw_item in td.get('tab_items', []):
+            ti = tp.add_new_tab_item()
+            ti.pos = raw_item['pos']
+            ti.type = _TYPE_MAP.get(raw_item['type'], TabItemType.LEFT)
+            ti.leader = _LEADER_MAP.get(raw_item['leader'], LineType2.NONE)
+            ti.unit = ValueUnit2.HWPUNIT
 
 
 # ============================================================
@@ -2054,6 +2112,37 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
         _build_line_seg_array(para, line_segs)
 
 
+def _preprocess_tab_fills(chars: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Replace HWP tab-fill sequences with (sentinel, TAB) across the full char list.
+
+    Pattern: TAB + <any non-control char (>=0x20)> + NULL(0x0000)
+    → SENTINEL + TAB  (fill chars and closing TAB are dropped)
+
+    This must run on the *full* paragraph char list before splitting by charPr,
+    because the TAB and its fill chars can span different charPr boundaries.
+    """
+    result: List[Tuple[int, int]] = []
+    i = 0
+    while i < len(chars):
+        pos_i, ch_i = chars[i]
+        if (ch_i == _CH_TAB
+                and i + 1 < len(chars)
+                and chars[i + 1][1] >= 0x0020
+                and i + 2 < len(chars)
+                and chars[i + 2][1] == 0x0000):
+            result.append((pos_i, _CH_TAB_FILL_SENTINEL))
+            result.append((pos_i, _CH_TAB))
+            i += 1  # move past the opening TAB
+            while i < len(chars) and chars[i][1] != _CH_TAB:
+                i += 1
+            if i < len(chars):
+                i += 1  # skip closing TAB
+        else:
+            result.append((pos_i, ch_i))
+            i += 1
+    return result
+
+
 def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
                                   char_shape_pairs: List[Tuple[int, int]],
                                   pg: List[dict],
@@ -2074,6 +2163,10 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
                 break
         return result
 
+    # Pre-process tab-fill sequences across the full char list before
+    # splitting by charPr, so cross-boundary patterns are handled correctly.
+    chars = _preprocess_tab_fills(chars)
+
     ctrl_iter = iter(ctrl_indices)
     current_run_chars: List[Tuple[int, int]] = []
     current_char_pr = get_char_pr_id(chars[0][0]) if chars else "0"
@@ -2081,9 +2174,17 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
     for char_pos, ch in chars:
         # Extended control chars (including table, field_begin, section_def, column_def, etc.)
         # each consume one control record from ctrl_iter.
+        # _CH_TAB_FILL_SENTINEL is a synthetic marker inserted by _preprocess_tab_fills;
+        # it must NOT consume a ctrl_iter entry.
         is_extended = (1 <= ch <= 31 and ch not in
                        (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END))
         if is_extended:
+            # Synthetic sentinel: pass through to run accumulation so _flush_run
+            # handles it (sets tab_fill_next flag), no ctrl record consumed.
+            if ch == _CH_TAB_FILL_SENTINEL:
+                current_run_chars.append((char_pos, ch))
+                continue
+
             # Flush pending text run
             if current_run_chars:
                 _flush_run(para, current_char_pr, current_run_chars)
@@ -2144,11 +2245,17 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
     run = para.add_new_run()
     run.char_pr_id_ref = char_pr_id
 
-    # Build T elements from the characters
+    # Build T elements from the characters.
+    # Tab-fill sequences were already replaced with (SENTINEL, TAB) by
+    # _preprocess_tab_fills() before the chars were split into runs.
     t = run.add_new_t()
     text_buf = []
 
+    tab_fill_next = False  # next TAB should carry leader="DOT"
     for char_pos, ch in chars:
+        if ch == _CH_TAB_FILL_SENTINEL:
+            tab_fill_next = True
+            continue
         if ch >= 0x0020:
             # Normal character
             text_buf.append(chr(ch))
@@ -2163,7 +2270,11 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
             if text_buf:
                 t.add_text(''.join(text_buf))
                 text_buf = []
-            t.add_new_tab()
+            tab = t.add_new_tab()
+            if tab_fill_next:
+                from .objects.header.enum_types import LineType2
+                tab.leader = LineType2.DOT
+                tab_fill_next = False
         elif ch == _CH_NBSPACE:
             # Non-breaking space
             if text_buf:
@@ -2670,10 +2781,18 @@ def _build_text_runs(para, chars: List[Tuple[int, int]],
                 break
         return result
 
+    # Pre-process tab-fill sequences across the full char list before
+    # splitting by charPr, so cross-boundary patterns are handled correctly.
+    chars = _preprocess_tab_fills(chars)
+
     current_run_chars = []
     current_char_pr = get_char_pr_id(chars[0][0]) if chars else "0"
 
     for char_pos, ch in chars:
+        # Sentinel: pass through to current run without consuming ctrl records.
+        if ch == _CH_TAB_FILL_SENTINEL:
+            current_run_chars.append((char_pos, ch))
+            continue
         char_pr = get_char_pr_id(char_pos)
         if char_pr != current_char_pr:
             if current_run_chars:
