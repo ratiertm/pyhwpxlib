@@ -120,7 +120,10 @@ def _write_hwpx_file(hwpx_file, hwpx_path: str, hwp: '_HWPDocument'):
     for i in range(hwpx_file.section_xml_file_list.count()):
         sec = hwpx_file.section_xml_file_list.get(i)
         write_section(xsb, sec)
-        xml_files[f"Contents/section{i}.xml"] = xsb.to_string().encode("utf-8")
+        _sec_str = xsb.to_string()
+        # Remove surrogate characters that can't be encoded to UTF-8
+        _sec_str = _sec_str.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+        xml_files[f"Contents/section{i}.xml"] = _sec_str.encode("utf-8")
 
     # version.xml (exact match to Java hwpxlib output)
     v = hwpx_file.version_xml_file
