@@ -501,8 +501,8 @@ class _HWPDocument:
 
         Binary layout (HWP 5.x spec):
           offset 0 : UINT32 flags  (bit0=autoTabLeft, bit1=autoTabRight)
-          offset 4 : UINT16 count  (number of tab items)
-          offset 6 : tab items, 8 bytes each:
+          offset 4 : UINT32 count  (number of tab items)
+          offset 8 : tab items, 8 bytes each:
             +0 INT32  position (HWPUNIT)
             +4 UINT8  type   (0=LEFT,1=RIGHT,2=CENTER,3=DECIMAL,4=BAR)
             +5 UINT8  leader (0=NONE,1=DOT,2=DOT_SPACE,3=UNDER,4=EQUAL,5=THICK)
@@ -519,9 +519,9 @@ class _HWPDocument:
                     prop = struct.unpack_from('<I', d, 0)[0]
                     auto_tab_left = bool(prop & 0x01)
                     auto_tab_right = bool(prop & 0x02)
-                if len(d) >= 6:
-                    count = struct.unpack_from('<H', d, 4)[0]
-                    pos = 6
+                if len(d) >= 8:
+                    count = struct.unpack_from('<I', d, 4)[0]
+                    pos = 8
                     for _ in range(count):
                         if pos + 8 > len(d):
                             break
