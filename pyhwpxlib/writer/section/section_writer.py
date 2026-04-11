@@ -221,7 +221,11 @@ def _write_t_item(xsb: XMLStringBuilder, item: Any) -> None:
                 xsb.attribute_index(AN.leader, leader)
         tab_type = getattr(item, "type", None)
         if tab_type is not None:
-            xsb.attribute_index(AN.type, tab_type)
+            # type may be stored as int or Enum
+            if isinstance(tab_type, int):
+                xsb.attribute(AN.type, tab_type)
+            else:
+                xsb.attribute_index(AN.type, tab_type)
         xsb.close_element()
     elif ot == ObjectType.hp_lineBreak:
         xsb.open_element(EN.hp_lineBreak)

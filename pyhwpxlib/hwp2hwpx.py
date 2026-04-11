@@ -2271,6 +2271,8 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
                 t.add_text(''.join(text_buf))
                 text_buf = []
             tab = t.add_new_tab()
+            tab.width = 4000   # default; required by Hancom schema
+            tab.type = 1       # LEFT
             if tab_fill_next:
                 from .objects.header.enum_types import LineType2
                 tab.leader = LineType2.DOT
@@ -3225,8 +3227,87 @@ def _build_drawing_object(shape_info: dict, sc_type_id: int,
         if obj.end_pt is not None:
             obj.end_pt.x, obj.end_pt.y = w, h
 
+    # DrawText: build from sub_records if PARA_TEXT present
+    draw_text = _build_draw_text(shape_info.get('sub_records', []), w, hwp)
+    if draw_text is not None:
+        obj.draw_text = draw_text
+
     logger.info("GSO: built %s (%dx%d)", type_name, w, h)
     return obj
+
+
+def _build_draw_text(sub_records: List[dict], width: int,
+                     hwp: '_HWPDocument') -> Optional[Any]:
+    """Build a DrawText object from LIST_HEADER + PARA_* sub-records.
+
+    Returns None if there are no text sub-records.
+    """
+    _TAG_SC_TEXTBOX = 79
+
+    list_hdr = next((r for r in sub_records if r['tag'] == _TAG_LIST_HEADER), None)
+    if list_hdr is None:
+        return None
+
+    from .objects.section.objects.drawing_object import DrawText as DrawTextObj
+    from .objects.section.section_xml_file import SubList
+    from .objects.section.paragraph import Para
+
+    dt = DrawTextObj()
+    dt.last_width = width
+    dt.editable = False
+
+    sl = dt.create_sub_list()
+    sl.id = ""
+    sl.text_direction = "HORIZONTAL"
+    sl.line_wrap = "BREAK"
+    sl.vert_align = "CENTER"
+    sl.link_list_id_ref = "0"
+    sl.link_list_next_id_ref = "0"
+    sl.text_width = 0
+    sl.text_height = 0
+    sl.has_text_ref = False
+    sl.has_num_ref = False
+
+    # Build paragraph(s) from PARA_* records
+    para_text_recs = [r for r in sub_records if r['tag'] == _TAG_PARA_TEXT]
+    char_shape_recs = [r for r in sub_records if r['tag'] == _TAG_PARA_CHAR_SHAPE]
+
+    para = sl.add_new_para()
+    para.id = str(0x80000000)
+    para.para_pr_id_ref = "0"
+    para.style_id_ref = "0"
+    para.page_break = False
+    para.column_break = False
+
+    # Determine charPrIDRef from PARA_CHAR_SHAPE
+    char_pr_id = "0"
+    if char_shape_recs:
+        d = char_shape_recs[0]['data']
+        if len(d) >= 8:
+            char_pr_id = str(struct.unpack_from('<I', d, 4)[0])
+
+    if para_text_recs:
+        # Collect characters
+        chars: List[Tuple[int, int]] = []
+        for rec in para_text_recs:
+            raw = rec['data']
+            for j in range(0, len(raw) - 1, 2):
+                cp = struct.unpack_from('<H', raw, j)[0]
+                if cp == 0x000D:  # PARA_END
+                    break
+                chars.append((j // 2, cp))
+        if chars:
+            _build_text_runs(para, chars, [(0, int(char_pr_id))])
+        else:
+            run = para.add_new_run()
+            run.char_pr_id_ref = char_pr_id
+            run.add_new_t()
+    else:
+        run = para.add_new_run()
+        run.char_pr_id_ref = char_pr_id
+        run.add_new_t()
+
+    return dt
 
 
 def _parse_polygon_points(sc_data: bytes) -> list:
@@ -3452,40 +3533,39 @@ def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[A
     # Children are subsequent SHAPE_COMPONENTs at a deeper level.
 
     container_sc_level = None
-    child_sc_records = []
+    # Group sub_records by child SC: [(child_sc_rec, [following_recs...]), ...]
+    child_groups: List[Tuple[dict, List[dict]]] = []
 
     for rec in sub_records:
         if rec['tag'] == _TAG_SHAPE_COMPONENT:
             if container_sc_level is None:
-                # This is the container's own SC
                 container_sc_level = rec.get('level', 0)
-            else:
-                # This is a child SC (should be container_sc_level + 1)
-                if rec.get('level', 0) > container_sc_level:
-                    child_sc_records.append(rec)
+            elif rec.get('level', 0) > container_sc_level:
+                child_groups.append((rec, []))
+        elif child_groups and rec.get('level', 0) > container_sc_level:
+            child_groups[-1][1].append(rec)
 
     child_count = 0
-    for child_rec in child_sc_records:
+    for child_idx, (child_rec, child_sub_recs) in enumerate(child_groups):
         child_data = child_rec['data']
         if len(child_data) < 4:
             continue
 
         child_type_id = struct.unpack_from('<I', child_data, 0)[0]
 
-        # Build child shape_info (reuse parent's position info as base)
         child_info = {
             'property': shape_info['property'],
             'x_offset': 0, 'y_offset': 0,
             'width': shape_info['width'],
             'height': shape_info['height'],
-            'z_order': 0,
+            'z_order': child_idx,
             'margin_left': 0, 'margin_right': 0,
             'margin_top': 0, 'margin_bottom': 0,
             'sc_data': child_data,
-            'sub_records': [],  # Children don't have sub-records in this model
+            'sub_records': child_sub_recs,
         }
 
-        # Try to extract width/height from child ShapeComponent
+        # Extract width/height from child ShapeComponent
         # Layout: type_id(4) + x(4) + y(4) + orgW(4) + orgH(4) + curW(4) + curH(4)
         if len(child_data) >= 28:
             child_info['width'] = struct.unpack_from('<I', child_data, 20)[0]
