@@ -679,7 +679,14 @@ class _HWPDocument:
         return results
 
     def _read_bin_data_entries(self) -> Dict[int, str]:
-        """Read HWPTAG_BIN_DATA entries, map ID -> extension."""
+        """Read HWPTAG_BIN_DATA entries, map ID -> extension.
+
+        BIN_DATA record layout:
+          offset 0: prop     (2 bytes) – storage type in lower 4 bits
+          offset 2: binDataID(2 bytes) – 1-based ID
+          offset 4: ext_len  (2 bytes) – extension string length (chars)
+          offset 6: ext      (ext_len*2 bytes) – UTF-16-LE extension
+        """
         result = {}
         idx = 0
         for rec in self.docinfo_records:
@@ -688,16 +695,14 @@ class _HWPDocument:
                 if len(d) >= 2:
                     prop = struct.unpack_from('<H', d, 0)[0]
                     data_type = prop & 0x0F
-                    # For embedded: prop has extension info
-                    ext = 'png'  # default
-                    if data_type == 0:  # LINK
-                        # absolute path follows
-                        pass
-                    elif data_type == 1:  # EMBEDDING
-                        if len(d) >= 4:
-                            ext_len = struct.unpack_from('<H', d, 2)[0]
-                            if 4 + ext_len * 2 <= len(d):
-                                ext = d[4:4 + ext_len * 2].decode('utf-16-le', errors='replace').lower()
+                    if data_type == 0:  # LINK – external file, nothing to embed
+                        idx += 1
+                        continue
+                    ext = 'png'  # default for EMBEDDING(1) / STORAGE(2)
+                    if len(d) >= 6:
+                        ext_len = struct.unpack_from('<H', d, 4)[0]
+                        if 6 + ext_len * 2 <= len(d):
+                            ext = d[6:6 + ext_len * 2].decode('utf-16-le', errors='replace').lower()
                 idx += 1
                 result[idx] = ext
         return result
@@ -793,9 +798,24 @@ def _build_hwpx(hwp: _HWPDocument) -> Any:
     _build_header(hwpx, hwp)
     _build_sections(hwpx, hwp)
     _build_settings(hwpx, hwp)
+    _attach_binary_data(hwpx, hwp)
 
     hwp.close()
     return hwpx
+
+
+def _attach_binary_data(hwpx, hwp: '_HWPDocument'):
+    """Read embedded binary data from HWP OLE streams and attach to HWPX."""
+    attachments = {}
+    for bin_id, ext in hwp.bin_data_ids.items():
+        hex_id = f"BIN{bin_id:04X}"
+        ole_stream = f"BinData/{hex_id}.{ext}"
+        if hwp.ole.exists(ole_stream):
+            data = hwp.ole.openstream(ole_stream).read()
+            attachments[f"BinData/{hex_id}.{ext}"] = data
+        else:
+            logger.warning("Binary stream not found in HWP OLE: %s", ole_stream)
+    hwpx._binary_attachments = attachments
 
 
 # ============================================================
@@ -2301,6 +2321,7 @@ def build_sec_pr_for_section(run, hwp: _HWPDocument, records: List[dict]):
         prop = struct.unpack_from('<I', d, 36)[0]
         landscape_val = prop & 0x01
 
+        # HWPX enum: WIDELY = portrait, NARROWLY = landscape
         page_pr.landscape = PageDirection.NARROWLY if landscape_val else PageDirection.WIDELY
         page_pr.width = width
         page_pr.height = height
@@ -2680,12 +2701,15 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
     height = struct.unpack_from('<I', ctrl_data, 20)[0]
     z_order = struct.unpack_from('<i', ctrl_data, 24)[0]
 
+    # CTRL_HEADER GSO outMargin fields are INT16 (2 bytes each), not INT32.
+    # See hwplib CtrlHeaderGso.java: offsets 28/30/32/34 are
+    # outMargin.left/right/top/bottom as INT16.
     margin_left = margin_right = margin_top = margin_bottom = 0
-    if len(ctrl_data) >= 44:
-        margin_left = struct.unpack_from('<i', ctrl_data, 28)[0]
-        margin_right = struct.unpack_from('<i', ctrl_data, 32)[0]
-        margin_top = struct.unpack_from('<i', ctrl_data, 36)[0]
-        margin_bottom = struct.unpack_from('<i', ctrl_data, 40)[0]
+    if len(ctrl_data) >= 36:
+        margin_left = struct.unpack_from('<h', ctrl_data, 28)[0]
+        margin_right = struct.unpack_from('<h', ctrl_data, 30)[0]
+        margin_top = struct.unpack_from('<h', ctrl_data, 32)[0]
+        margin_bottom = struct.unpack_from('<h', ctrl_data, 34)[0]
 
     shape_comp_rec = None
     for rec in sub_records:
@@ -2741,6 +2765,97 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
     else:
         logger.debug("GSO: unsupported type 0x%08X, skipping", sc_type_id)
         return None
+
+
+def _populate_shape_component_base(obj: Any, w: int, h: int,
+                                    x_off: int = 0, y_off: int = 0) -> None:
+    """Populate required ShapeComponent base fields (offset/orgSz/curSz/flip/
+    rotationInfo/renderingInfo) with sensible defaults. HWPX schema requires
+    all of these for any ShapeComponent-derived element; omitting them causes
+    Hancom Office to reject the file.
+    """
+    from .objects.section.objects.drawing_object import (
+        Flip, RotationInfo, RenderingInfo, Matrix,
+    )
+    from .objects.common.base_objects import XAndY, WidthAndHeight
+    from .object_type import ObjectType
+
+    obj.offset = XAndY(ObjectType.hp_offset_for_shapeComponent)
+    obj.offset.x = x_off
+    obj.offset.y = y_off
+
+    obj.org_sz = WidthAndHeight(ObjectType.hp_orgSz)
+    obj.org_sz.width = w
+    obj.org_sz.height = h
+
+    obj.cur_sz = WidthAndHeight(ObjectType.hp_curSz)
+    obj.cur_sz.width = w
+    obj.cur_sz.height = h
+
+    obj.flip = Flip()
+    obj.flip.horizontal = False
+    obj.flip.vertical = False
+
+    obj.rotation_info = RotationInfo()
+    obj.rotation_info.angle = 0
+    obj.rotation_info.center_x = w // 2
+    obj.rotation_info.center_y = h // 2
+    obj.rotation_info.rotate_image = True
+
+    ri = RenderingInfo()
+    ri.trans_matrix = Matrix(_object_type_value=ObjectType.hc_transMatrix)
+    ri.trans_matrix.e1 = 1.0
+    ri.trans_matrix.e2 = 0.0
+    ri.trans_matrix.e3 = 0.0
+    ri.trans_matrix.e4 = 1.0
+    ri.trans_matrix.e5 = 0.0
+    ri.trans_matrix.e6 = 0.0
+    ri.sca_matrix = Matrix(_object_type_value=ObjectType.hc_scaMatrix)
+    ri.sca_matrix.e1 = 1.0
+    ri.sca_matrix.e2 = 0.0
+    ri.sca_matrix.e3 = 0.0
+    ri.sca_matrix.e4 = 1.0
+    ri.sca_matrix.e5 = 0.0
+    ri.sca_matrix.e6 = 0.0
+    ri.rot_matrix = Matrix(_object_type_value=ObjectType.hc_rotMatrix)
+    ri.rot_matrix.e1 = 1.0
+    ri.rot_matrix.e2 = 0.0
+    ri.rot_matrix.e3 = 0.0
+    ri.rot_matrix.e4 = 1.0
+    ri.rot_matrix.e5 = 0.0
+    ri.rot_matrix.e6 = 0.0
+    obj.rendering_info = ri
+
+
+def _default_line_shape() -> Any:
+    """Build a minimal black solid line shape."""
+    from .objects.section.objects.picture import LineShape
+    ls = LineShape()
+    ls.color = "#000000"
+    ls.width = 100
+    ls.style = "NORMAL"
+    ls.end_cap = "FLAT"
+    ls.head_style = "NORMAL"
+    ls.tail_style = "NORMAL"
+    ls.head_sz = "SMALL_SMALL"
+    ls.tail_sz = "SMALL_SMALL"
+    ls.head_fill = True
+    ls.tail_fill = True
+    ls.alpha = 0.0
+    return ls
+
+
+def _default_fill_brush() -> Any:
+    """Build a minimal white-fill FillBrush."""
+    from .objects.header.references.border_fill import FillBrush, WinBrush
+    fb = FillBrush()
+    wb = WinBrush()
+    wb.faceColor = "#FFFFFF"
+    wb.hatchColor = "#000000"
+    wb.hatchStyle = "NONE"
+    wb.alpha = 0.0
+    fb.winBrush = wb
+    return fb
 
 
 def _try_build_picture(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
@@ -2799,9 +2914,18 @@ def _try_build_picture(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
     pic.out_margin.bottom = shape_info['margin_bottom']
 
     w, h = shape_info['width'], shape_info['height']
+    _populate_shape_component_base(
+        pic, w, h, shape_info['x_offset'], shape_info['y_offset']
+    )
+    # Picture also requires a lineShape (border around the image)
+    pic.line_shape = _default_line_shape()
+
     pic.img_dim = ImageDim()
     pic.img_dim.width = w
     pic.img_dim.height = h
+    # Writer reads dim_width/dim_height attributes — set them explicitly.
+    pic.img_dim.dim_width = w
+    pic.img_dim.dim_height = h
 
     pic.img_rect = ImageRect()
     pic.img_rect.pt0 = Point(ObjectType.hc_pt0)
@@ -2902,11 +3026,18 @@ def _build_drawing_object(shape_info: dict, sc_type_id: int,
     obj.out_margin.top = shape_info['margin_top']
     obj.out_margin.bottom = shape_info['margin_bottom']
 
+    # Required ShapeComponent base fields (offset/orgSz/curSz/flip/
+    # rotationInfo/renderingInfo). Without these HWPX schema validation fails.
+    w_tmp, h_tmp = shape_info['width'], shape_info['height']
+    _populate_shape_component_base(
+        obj, w_tmp, h_tmp, shape_info['x_offset'], shape_info['y_offset']
+    )
+
     # Parse ShapeComponent for lineInfo, fillInfo, shadowInfo
     sc_data = shape_info['sc_data']
     line_shape, shadow = _parse_sc_line_and_shadow(sc_data)
-    if line_shape is not None:
-        obj.line_shape = line_shape
+    obj.line_shape = line_shape if line_shape is not None else _default_line_shape()
+    obj.fill_brush = _default_fill_brush()
     if shadow is not None:
         obj.shadow = shadow
 
@@ -2934,9 +3065,69 @@ def _build_drawing_object(shape_info: dict, sc_type_id: int,
             obj.ax1.x, obj.ax1.y = w, h // 2
             obj.ax2 = Point(ObjectType.hc_ax2)
             obj.ax2.x, obj.ax2.y = w // 2, h
+    elif type_name == 'Arc':
+        # hp:arc requires center + ax1 + ax2. Fall back to bounding box.
+        obj.center = Point(ObjectType.hc_center)
+        obj.center.x, obj.center.y = w // 2, h // 2
+        obj.ax1 = Point(ObjectType.hc_ax1)
+        obj.ax1.x, obj.ax1.y = w, h // 2
+        obj.ax2 = Point(ObjectType.hc_ax2)
+        obj.ax2.x, obj.ax2.y = w // 2, h
+    elif type_name == 'Polygon':
+        # hp:polygon schema requires at least 3 points. Fallback: 4 bounding-box
+        # corners so the file opens even if point parsing fails.
+        pts = _parse_polygon_points(sc_data)
+        if not pts or len(pts) < 3:
+            pts = [(0, 0), (w, 0), (w, h), (0, h)]
+        for px, py in pts:
+            pt = obj.add_new_pt()
+            pt.x, pt.y = px, py
+    elif type_name == 'Curve':
+        # hp:curve requires at least 1 segment. Provide a minimal 2-point line
+        # fallback so Hangul accepts the file.
+        from .objects.section.objects.shapes import CurveSegment
+        seg = obj.add_new_seg()
+        seg.x1, seg.y1 = 0, 0
+        seg.x2, seg.y2 = w, h
+    elif type_name == 'ConnectLine':
+        # hp:connectLine requires startPt and endPt.
+        obj.start_pt = obj.create_start_pt() if hasattr(obj, 'create_start_pt') else None
+        if obj.start_pt is not None:
+            obj.start_pt.x, obj.start_pt.y = 0, 0
+        obj.end_pt = obj.create_end_pt() if hasattr(obj, 'create_end_pt') else None
+        if obj.end_pt is not None:
+            obj.end_pt.x, obj.end_pt.y = w, h
 
     logger.info("GSO: built %s (%dx%d)", type_name, w, h)
     return obj
+
+
+def _parse_polygon_points(sc_data: bytes) -> list:
+    """Heuristically parse polygon point list from ShapeComponent bytes.
+
+    The point count is stored as UINT32 followed by count * (INT32 x, INT32 y).
+    We scan for a plausible count (3..1024) whose payload fits within sc_data.
+    Returns list of (x, y) tuples or empty list on failure.
+    """
+    import struct as _s
+    n = len(sc_data)
+    # scan from offset 4 onward (skip type_id)
+    for off in range(4, max(4, n - 4), 2):
+        if off + 4 > n:
+            break
+        cnt = _s.unpack_from('<I', sc_data, off)[0]
+        if 3 <= cnt <= 1024 and off + 4 + cnt * 8 <= n:
+            pts = []
+            for i in range(cnt):
+                x, y = _s.unpack_from('<ii', sc_data, off + 4 + i * 8)
+                # sanity: reject wildly out-of-range values (>100M HWPUNIT)
+                if abs(x) > 100_000_000 or abs(y) > 100_000_000:
+                    pts = []
+                    break
+                pts.append((x, y))
+            if pts:
+                return pts
+    return []
 
 
 def _parse_sc_line_and_shadow(sc_data: bytes) -> tuple:
@@ -3051,6 +3242,12 @@ def _build_ole_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
     ole.out_margin.top = shape_info['margin_top']
     ole.out_margin.bottom = shape_info['margin_bottom']
 
+    _populate_shape_component_base(
+        ole, shape_info['width'], shape_info['height'],
+        shape_info['x_offset'], shape_info['y_offset'],
+    )
+    ole.ole_line_shape = _default_line_shape()
+
     # OLE-specific: try to find binDataId reference
     sc_data = shape_info['sc_data']
     bin_item_id = _find_bin_item_id_in_sc(sc_data, hwp)
@@ -3111,6 +3308,11 @@ def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[A
     container.out_margin.right = shape_info['margin_right']
     container.out_margin.top = shape_info['margin_top']
     container.out_margin.bottom = shape_info['margin_bottom']
+
+    _populate_shape_component_base(
+        container, shape_info['width'], shape_info['height'],
+        shape_info['x_offset'], shape_info['y_offset'],
+    )
 
     # Find child SHAPE_COMPONENT records (level = container SC level + 1)
     sub_records = shape_info['sub_records']
@@ -3224,6 +3426,10 @@ def _build_textart_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any
     ta.out_margin.bottom = shape_info['margin_bottom']
 
     w, h = shape_info['width'], shape_info['height']
+    _populate_shape_component_base(
+        ta, w, h, shape_info['x_offset'], shape_info['y_offset']
+    )
+
     ta.pt0 = Point(ObjectType.hc_pt0)
     ta.pt0.x, ta.pt0.y = 0, 0
     ta.pt1 = Point(ObjectType.hc_pt1)
@@ -3248,8 +3454,8 @@ def _build_textart_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any
 
     # Parse lineInfo/shadow from SC data
     line_shape, shadow = _parse_sc_line_and_shadow(sc_data)
-    if line_shape is not None:
-        ta.line_shape = line_shape
+    ta.line_shape = line_shape if line_shape is not None else _default_line_shape()
+    ta.fill_brush = _default_fill_brush()
     if shadow is not None:
         ta.shadow = shadow
 
