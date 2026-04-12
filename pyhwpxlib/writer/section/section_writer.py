@@ -474,6 +474,7 @@ def _write_page_hiding(xsb: XMLStringBuilder, ph: Any) -> None:
 
 def _write_page_num(xsb: XMLStringBuilder, pn: Any) -> None:
     xsb.open_element(EN.hp_pageNum)
+    xsb.attribute(AN.pos, pn.pos if hasattr(pn, "pos") else None)
     xsb.attribute(AN.formatType, pn.formatType if hasattr(pn, "formatType") else getattr(pn, "format_type", None))
     xsb.attribute(AN.sideChar, pn.sideChar if hasattr(pn, "sideChar") else getattr(pn, "side_char", None))
     xsb.close_element()

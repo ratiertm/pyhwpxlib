@@ -60,6 +60,7 @@ _CH_LINE_BREAK = 10
 _CH_PARA_END = 13
 _CH_HEAD_FOOT = 16  # header / footer inline control
 _CH_AUTO_NUM = 18   # auto number (page, footnote, endnote, etc.)
+_CH_PAGE_NUM = 21   # 쪽 번호 위치 (pgnp) inline control (0x15)
 _CH_NEW_NUM = 24    # NOTE: conflicts with _CH_HYPHEN below; only in non-text context
 _CH_NBSPACE = 30
 _CH_FWSPACE = 31
@@ -70,6 +71,7 @@ _CTRL_ID_HEADER   = 0x68656164  # 'head'
 _CTRL_ID_FOOTER   = 0x666f6f74  # 'foot'
 _CTRL_ID_AUTO_NUM = 0x61746e6f  # 'atno'
 _CTRL_ID_NEW_NUM  = 0x6e776e6f  # 'nwno'
+_CTRL_ID_PAGE_NUM = 0x70676e70  # 'pgnp' - 쪽 번호 위치
 
 # applyPageType mapping for header/footer (HWP prop bits 0-1)
 _APPLY_PAGE_TYPE = {0: 'BOTH', 1: 'EVEN', 2: 'ODD'}
@@ -948,7 +950,8 @@ def _attach_binary_data(hwpx, hwp: '_HWPDocument'):
         hex_id = f"BIN{bin_id:04X}"
         ole_stream = f"BinData/{hex_id}.{ext}"
         if hwp.ole.exists(ole_stream):
-            data = hwp.ole.openstream(ole_stream).read()
+            raw = hwp.ole.openstream(ole_stream).read()
+            data = hwp._decompress(raw)
             attachments[f"BinData/{hex_id}.{ext}"] = data
         else:
             logger.warning("Binary stream not found in HWP OLE: %s", ole_stream)
@@ -1050,6 +1053,7 @@ def _build_content_hpf(hwpx, hwp: _HWPDocument):
         item.id = item_id
         item.href = href
         item.media_type = _media_type(ext)
+        item.is_embedded = True
         bin_data_id_map[bin_id] = item_id
 
     # Spine
@@ -2210,7 +2214,7 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
         while i < len(text_data) - 1:
             ch = struct.unpack_from('<H', text_data, i)[0]
             i += 2
-            if ch in (_CH_TABLE, _CH_AUTO_NUM, _CH_HEAD_FOOT):
+            if ch in (_CH_TABLE, _CH_AUTO_NUM, _CH_HEAD_FOOT, _CH_PAGE_NUM):
                 needs_ctrl_processing = True
             chars.append((pos, ch))
             if ch == _CH_PARA_END:
@@ -2358,6 +2362,13 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
                         run.char_pr_id_ref = get_char_pr_id(char_pos)
                         ctrl_wrap = run.add_new_ctrl()
                         ctrl_wrap.add_ctrl_item(an_obj)
+                elif ctrl_id == _CTRL_ID_PAGE_NUM and ch == _CH_PAGE_NUM:
+                    pn_obj = _build_page_num_object(ctrl_rec)
+                    if pn_obj is not None:
+                        run = para.add_new_run()
+                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        ctrl_wrap = run.add_new_ctrl()
+                        ctrl_wrap.add_ctrl_item(pn_obj)
 
             # Reset char_pr for next segment
             current_char_pr = get_char_pr_id(char_pos)
@@ -2783,7 +2794,7 @@ def _build_paragraph_with_secpr(section, hwp: _HWPDocument, pg: List[dict],
             j += 2
             if ch == _CH_SECTION_DEF:
                 has_sec_def = True
-            elif ch in (_CH_TABLE, _CH_HEAD_FOOT, _CH_AUTO_NUM):
+            elif ch in (_CH_TABLE, _CH_HEAD_FOOT, _CH_AUTO_NUM, _CH_PAGE_NUM):
                 has_table = True  # any ctrl object requiring ctrl record processing
             elif ch == _CH_PARA_END:
                 break
@@ -2992,6 +3003,66 @@ def _build_auto_num_object(ctrl_rec: dict) -> Optional[Any]:
     anf.suffix_char = ""
     anf.supscript = False
     return an
+
+
+def _build_page_num_object(ctrl_rec: dict) -> Optional[Any]:
+    """Build a PageNum CtrlItem from a 'pgnp' CTRL_HEADER record.
+
+    pgnp layout (16 bytes):
+      [0-3]  ctrl_id  'pgnp'
+      [4]    num_type (0=Arabic, 1=Roman upper, 2=Roman lower, ...)
+      [5]    position (0=TOP_RIGHT, 1=BOTTOM_RIGHT, 2=TOP_LEFT, 3=BOTTOM_LEFT,
+                       4=TOP_CENTER, 5=BOTTOM_CENTER, 6=INSIDE_TOP, 7=INSIDE_BOTTOM,
+                       8=OUTSIDE_TOP, 9=OUTSIDE_BOTTOM)
+      [6-7]  new_num  (starting page number, uint16)
+      [8-13] reserved
+      [14-15] side_char (UTF-16-LE separator character, e.g. '-')
+    """
+    from .objects.section.ctrl import PageNum
+    from .objects.section.enum_types import PageNumPosition
+    from .objects.header.enum_types import NumberType1
+
+    data = ctrl_rec['data']
+    if len(data) < 8:
+        return None
+
+    num_type_val = data[4] if len(data) > 4 else 0
+    position_val = data[5] if len(data) > 5 else 5
+
+    _POS_MAP = {
+        0: PageNumPosition.TOP_RIGHT,
+        1: PageNumPosition.BOTTOM_RIGHT,
+        2: PageNumPosition.TOP_LEFT,
+        3: PageNumPosition.BOTTOM_LEFT,
+        4: PageNumPosition.TOP_CENTER,
+        5: PageNumPosition.BOTTOM_CENTER,
+        6: PageNumPosition.INSIDE_TOP,
+        7: PageNumPosition.INSIDE_BOTTOM,
+        8: PageNumPosition.OUTSIDE_TOP,
+        9: PageNumPosition.OUTSIDE_BOTTOM,
+    }
+    _NUM_TYPE_MAP = {
+        0: NumberType1.DIGIT,
+        1: NumberType1.ROMAN_CAPITAL,
+        2: NumberType1.ROMAN_SMALL,
+        3: NumberType1.HANGUL_JAMO,
+        4: NumberType1.HANGUL_SYLLABLE,
+    }
+
+    side_char = None
+    if len(data) >= 16:
+        sc = struct.unpack_from('<H', data, 14)[0]
+        if sc and sc != 0xFFFF:
+            try:
+                side_char = chr(sc)
+            except (ValueError, OverflowError):
+                pass
+
+    pn = PageNum()
+    pn.pos = _POS_MAP.get(position_val, PageNumPosition.BOTTOM_CENTER)
+    pn.format_type = _NUM_TYPE_MAP.get(num_type_val, NumberType1.DIGIT)
+    pn.side_char = side_char
+    return pn
 
 
 def _build_header_footer_object(sub_records: List[dict], ctrl_rec: dict,
@@ -3358,10 +3429,13 @@ def _try_build_picture(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
     pic.img_rect.pt3 = Point(ObjectType.hc_pt3)
     pic.img_rect.pt3.x, pic.img_rect.pt3.y = 0, h
 
+    from .objects.header.enum_types import ImageEffect
     pic.img = Image()
     pic.img.binaryItemIDRef = f"BIN{bin_item_id:04X}"
     pic.img.bright = 0
     pic.img.contrast = 0
+    pic.img.effect = ImageEffect.REAL_PIC
+    pic.img.alpha = 0
 
     logger.info("GSO: built Picture with binItemID=%d", bin_item_id)
     return pic
