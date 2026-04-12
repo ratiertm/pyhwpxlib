@@ -343,24 +343,16 @@ def _write_para_pr(xsb: XMLStringBuilder, pp: Any) -> None:
         xsb.attribute(AN.eAsianNum, asp.eAsianNum if hasattr(asp, "eAsianNum") else getattr(asp, "e_asian_num", None))
         xsb.close_element()
 
-    # Margin + LineSpacing must be wrapped in <hp:switch><hp:default> so that
-    # HWPX readers (including rhwp) correctly apply indentation and line spacing.
-    # Original HWPX files from Hancom always use this wrapper.
     mg = getattr(pp, "margin", None)
     ls = getattr(pp, "lineSpacing", getattr(pp, "line_spacing", None))
-    if mg is not None or ls is not None:
-        xsb.open_element(EN.hp_switch)
-        xsb.open_element(EN.hp_default)
-        if mg is not None:
-            _write_para_margin(xsb, mg)
-        if ls is not None:
-            xsb.open_element(EN.hh_lineSpacing)
-            xsb.attribute(AN.type, ls.type)
-            xsb.attribute(AN.value, ls.value)
-            xsb.attribute(AN.unit, ls.unit)
-            xsb.close_element()
-        xsb.close_element()  # hp:default
-        xsb.close_element()  # hp:switch
+    if mg is not None:
+        _write_para_margin(xsb, mg)
+    if ls is not None:
+        xsb.open_element(EN.hh_lineSpacing)
+        xsb.attribute(AN.type, ls.type)
+        xsb.attribute(AN.value, ls.value)
+        xsb.attribute(AN.unit, ls.unit)
+        xsb.close_element()
 
     # Border
     bd = getattr(pp, "border", None)
@@ -569,13 +561,14 @@ def _write_tab_pr(xsb: XMLStringBuilder, tp: Any) -> None:
     tab_items = getattr(tp, "tabItems", getattr(tp, "tab_items", None))
     if tab_items is not None:
         items = tab_items() if callable(tab_items) else tab_items
-        for ti in items:
-            xsb.open_element(EN.hh_tabItem)
-            xsb.attribute(AN.pos, ti.pos)
-            xsb.attribute(AN.type, ti.type)
-            xsb.attribute(AN.leader, ti.leader)
-            xsb.attribute(AN.unit, ti.unit)
-            xsb.close_element()
+        items_list = list(items)
+        if items_list:
+            for ti in items_list:
+                xsb.open_element(EN.hh_tabItem)
+                xsb.attribute(AN.pos, ti.pos)
+                xsb.attribute(AN.type, ti.type)
+                xsb.attribute(AN.leader, ti.leader)
+                xsb.close_element()
 
     xsb.close_element()
 

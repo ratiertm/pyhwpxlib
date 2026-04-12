@@ -1303,12 +1303,14 @@ def _build_tab_properties(ref_list, hwp: _HWPDocument):
     from .objects.header.enum_types import LineType2, TabItemType, ValueUnit2
 
     # HWP leader byte → HWPX LineType2
+    # NOTE: Hancom's own converter maps HWP UNDERSCORE(3) → HWPX DOT,
+    # not SOLID.  SOLID is used for thick-line fills only.
     _LEADER_MAP = {
         0: LineType2.NONE,
         1: LineType2.DOT,
-        2: LineType2.DOT,        # DOT_SPACE → DOT (closest)
-        3: LineType2.SOLID,      # UNDERSCORE → SOLID
-        4: LineType2.DASH,       # EQUAL → DASH (closest)
+        2: LineType2.DOT,        # DOT_SPACE → DOT
+        3: LineType2.DOT,        # UNDERSCORE → DOT (Hancom HWPX convention)
+        4: LineType2.DASH,       # EQUAL → DASH
         5: LineType2.SOLID,      # THICK_LINE → SOLID
     }
     # HWP type byte → HWPX TabItemType
@@ -2113,34 +2115,13 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
 
 
 def _preprocess_tab_fills(chars: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    """Replace HWP tab-fill sequences with (sentinel, TAB) across the full char list.
+    """Pass chars through unchanged.
 
-    Pattern: TAB + <any non-control char (>=0x20)> + NULL(0x0000)
-    → SENTINEL + TAB  (fill chars and closing TAB are dropped)
-
-    This must run on the *full* paragraph char list before splitting by charPr,
-    because the TAB and its fill chars can span different charPr boundaries.
+    Tab-fill sequences (TAB + fill_chars + NULL + closing_TAB) are preserved
+    as-is so that the fill chars render naturally as text content between two
+    hp:tab elements, matching the original HWPX format.
     """
-    result: List[Tuple[int, int]] = []
-    i = 0
-    while i < len(chars):
-        pos_i, ch_i = chars[i]
-        if (ch_i == _CH_TAB
-                and i + 1 < len(chars)
-                and chars[i + 1][1] >= 0x0020
-                and i + 2 < len(chars)
-                and chars[i + 2][1] == 0x0000):
-            result.append((pos_i, _CH_TAB_FILL_SENTINEL))
-            result.append((pos_i, _CH_TAB))
-            i += 1  # move past the opening TAB
-            while i < len(chars) and chars[i][1] != _CH_TAB:
-                i += 1
-            if i < len(chars):
-                i += 1  # skip closing TAB
-        else:
-            result.append((pos_i, ch_i))
-            i += 1
-    return result
+    return chars
 
 
 def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
@@ -2174,17 +2155,9 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
     for char_pos, ch in chars:
         # Extended control chars (including table, field_begin, section_def, column_def, etc.)
         # each consume one control record from ctrl_iter.
-        # _CH_TAB_FILL_SENTINEL is a synthetic marker inserted by _preprocess_tab_fills;
-        # it must NOT consume a ctrl_iter entry.
         is_extended = (1 <= ch <= 31 and ch not in
                        (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END))
         if is_extended:
-            # Synthetic sentinel: pass through to run accumulation so _flush_run
-            # handles it (sets tab_fill_next flag), no ctrl record consumed.
-            if ch == _CH_TAB_FILL_SENTINEL:
-                current_run_chars.append((char_pos, ch))
-                continue
-
             # Flush pending text run
             if current_run_chars:
                 _flush_run(para, current_char_pr, current_run_chars)
@@ -2251,13 +2224,9 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
     t = run.add_new_t()
     text_buf = []
 
-    tab_fill_next = False  # next TAB should carry leader="DOT"
     for char_pos, ch in chars:
-        if ch == _CH_TAB_FILL_SENTINEL:
-            tab_fill_next = True
-            continue
         if ch >= 0x0020:
-            # Normal character
+            # Normal character (includes fill chars between tab pairs)
             text_buf.append(chr(ch))
         elif ch == _CH_LINE_BREAK:
             # Flush text, add lineBreak
@@ -2266,17 +2235,11 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
                 text_buf = []
             t.add_new_line_break()
         elif ch == _CH_TAB:
-            # Flush text, add tab
+            # Flush text, add tab (no attributes - matches original HWPX format)
             if text_buf:
                 t.add_text(''.join(text_buf))
                 text_buf = []
-            tab = t.add_new_tab()
-            tab.width = 4000   # default; required by Hancom schema
-            tab.type = 1       # LEFT
-            if tab_fill_next:
-                from .objects.header.enum_types import LineType2
-                tab.leader = LineType2.DOT
-                tab_fill_next = False
+            t.add_new_tab()
         elif ch == _CH_NBSPACE:
             # Non-breaking space
             if text_buf:
@@ -2434,14 +2397,12 @@ def build_sec_pr_for_section(run, hwp: _HWPDocument, records: List[dict]):
         prop = struct.unpack_from('<I', d, 36)[0]
         landscape_val = prop & 0x01
 
-        # HWPX enum: WIDELY = portrait, NARROWLY = landscape
-        # HWP stores paper-orientation dimensions (short x long) regardless of
-        # landscape flag; HWPX expects actual display dimensions (width > height
-        # when landscape).  Swap so the viewer renders the page correctly.
+        # HWPX: NARROWLY = landscape, WIDELY = portrait.
+        # Paper dimensions in HWP binary are always in natural paper orientation;
+        # HWPX keeps them as-is — the landscape attribute alone tells the viewer
+        # the orientation.  Do NOT swap width/height.
         if landscape_val:
             page_pr.landscape = PageDirection.NARROWLY
-            if width < height:
-                width, height = height, width
         else:
             page_pr.landscape = PageDirection.WIDELY
         page_pr.width = width
@@ -2783,18 +2744,10 @@ def _build_text_runs(para, chars: List[Tuple[int, int]],
                 break
         return result
 
-    # Pre-process tab-fill sequences across the full char list before
-    # splitting by charPr, so cross-boundary patterns are handled correctly.
-    chars = _preprocess_tab_fills(chars)
-
     current_run_chars = []
     current_char_pr = get_char_pr_id(chars[0][0]) if chars else "0"
 
     for char_pos, ch in chars:
-        # Sentinel: pass through to current run without consuming ctrl records.
-        if ch == _CH_TAB_FILL_SENTINEL:
-            current_run_chars.append((char_pos, ch))
-            continue
         char_pr = get_char_pr_id(char_pos)
         if char_pr != current_char_pr:
             if current_run_chars:
@@ -2896,6 +2849,55 @@ def _build_gso_object(sub_records: List[dict], ctrl_rec: dict,
         return None
 
 
+def _read_sc_matrices(sc_data: bytes, is_container: bool = False):
+    """Read rendering matrices from ShapeComponent binary data.
+
+    Returns list of (ObjectType, e1..e6) tuples:
+      - index 0: transMatrix
+      - index 1: scaMatrix
+      - index 2: rotMatrix
+      - index 3+: extra scaMatrix/rotMatrix pairs
+
+    Standard GSOBASE layout offsets:
+      [46:48] N_groups (UINT16)  – number of extra sca+rot matrix pairs
+      [48+]   (1 + 2*N_groups) matrices × 6 doubles (48 bytes each)
+
+    Container GSOBASE is shifted by +4 due to extra type_id at [4:8].
+    """
+    from .objects.section.objects.drawing_object import Matrix
+    from .object_type import ObjectType
+
+    base = 4 if is_container else 0
+    # N_groups offset: 46 (standard) or 50 (container)
+    n_off = base + 46
+    mat_off = base + 48
+
+    if len(sc_data) < n_off + 2:
+        return []
+
+    n_groups = struct.unpack_from('<H', sc_data, n_off)[0]
+    total_mats = 1 + 2 * n_groups
+
+    # Sanity check: need enough bytes
+    needed = mat_off + total_mats * 48
+    if len(sc_data) < needed:
+        return []
+
+    type_seq = (
+        [ObjectType.hc_transMatrix]
+        + [t for _ in range(n_groups) for t in (ObjectType.hc_scaMatrix, ObjectType.hc_rotMatrix)]
+    )
+
+    result = []
+    for i, ot in enumerate(type_seq):
+        off = mat_off + i * 48
+        e1, e2, e3, e4, e5, e6 = struct.unpack_from('<6d', sc_data, off)
+        m = Matrix(_object_type_value=ot)
+        m.e1, m.e2, m.e3, m.e4, m.e5, m.e6 = e1, e2, e3, e4, e5, e6
+        result.append(m)
+    return result
+
+
 def _populate_shape_component_base(obj: Any, w: int, h: int,
                                     x_off: int = 0, y_off: int = 0) -> None:
     """Populate required ShapeComponent base fields (offset/orgSz/curSz/flip/
@@ -2936,22 +2938,22 @@ def _populate_shape_component_base(obj: Any, w: int, h: int,
     ri.trans_matrix.e1 = 1.0
     ri.trans_matrix.e2 = 0.0
     ri.trans_matrix.e3 = 0.0
-    ri.trans_matrix.e4 = 1.0
-    ri.trans_matrix.e5 = 0.0
+    ri.trans_matrix.e4 = 0.0
+    ri.trans_matrix.e5 = 1.0
     ri.trans_matrix.e6 = 0.0
     ri.sca_matrix = Matrix(_object_type_value=ObjectType.hc_scaMatrix)
     ri.sca_matrix.e1 = 1.0
     ri.sca_matrix.e2 = 0.0
     ri.sca_matrix.e3 = 0.0
-    ri.sca_matrix.e4 = 1.0
-    ri.sca_matrix.e5 = 0.0
+    ri.sca_matrix.e4 = 0.0
+    ri.sca_matrix.e5 = 1.0
     ri.sca_matrix.e6 = 0.0
     ri.rot_matrix = Matrix(_object_type_value=ObjectType.hc_rotMatrix)
     ri.rot_matrix.e1 = 1.0
     ri.rot_matrix.e2 = 0.0
     ri.rot_matrix.e3 = 0.0
-    ri.rot_matrix.e4 = 1.0
-    ri.rot_matrix.e5 = 0.0
+    ri.rot_matrix.e4 = 0.0
+    ri.rot_matrix.e5 = 1.0
     ri.rot_matrix.e6 = 0.0
     obj.rendering_info = ri
 
@@ -3166,9 +3168,22 @@ def _build_drawing_object(shape_info: dict, sc_type_id: int,
     sc_data = shape_info['sc_data']
     line_shape, shadow = _parse_sc_line_and_shadow(sc_data)
     obj.line_shape = line_shape if line_shape is not None else _default_line_shape()
+    # Parse face fill color from SC data; fall back to white default.
     obj.fill_brush = _default_fill_brush()
+    face_color = _parse_sc_fill_color(sc_data)
+    if face_color and obj.fill_brush.winBrush is not None:
+        obj.fill_brush.winBrush.faceColor = face_color
+
     if shadow is not None:
         obj.shadow = shadow
+
+    # Rect-specific: rounded-corner ratio (from tag-79 sub-record)
+    if type_name == 'Rectangle':
+        _TAG_RECT_INFO = 79
+        for sr in shape_info.get('sub_records', []):
+            if sr['tag'] == _TAG_RECT_INFO and len(sr['data']) >= 4:
+                obj.ratio = struct.unpack_from('<I', sr['data'], 0)[0]
+                break
 
     # Type-specific geometry (corner points for rect, etc.)
     w, h = shape_info['width'], shape_info['height']
@@ -3272,10 +3287,25 @@ def _build_draw_text(sub_records: List[dict], width: int,
     para_text_recs = [r for r in sub_records if r['tag'] == _TAG_PARA_TEXT]
     char_shape_recs = [r for r in sub_records if r['tag'] == _TAG_PARA_CHAR_SHAPE]
 
+    # Read paraPrIDRef / styleIDRef from PARA_HEADER if present
+    para_pr_id_ref = "0"
+    style_id_ref = "0"
+    para_hdr_recs = [r for r in sub_records if r['tag'] == _TAG_PARA_HEADER]
+    if para_hdr_recs:
+        ph_data = para_hdr_recs[0]['data']
+        # PARA_HEADER layout (HWP 5.x spec):
+        #   [0:4]  UINT32 text_length
+        #   [4:8]  UINT32 control_mask
+        #   [8:10] UINT16 paraPrIDRef   (paragraph property index)
+        #   [10:12] UINT16 styleIDRef   (style index)
+        if len(ph_data) >= 12:
+            para_pr_id_ref = str(struct.unpack_from('<H', ph_data, 8)[0])
+            style_id_ref   = str(struct.unpack_from('<H', ph_data, 10)[0])
+
     para = sl.add_new_para()
     para.id = str(0x80000000)
-    para.para_pr_id_ref = "0"
-    para.style_id_ref = "0"
+    para.para_pr_id_ref = para_pr_id_ref
+    para.style_id_ref = style_id_ref
     para.page_break = False
     para.column_break = False
 
@@ -3338,76 +3368,75 @@ def _parse_polygon_points(sc_data: bytes) -> list:
     return []
 
 
+def _colorref_to_hex(val: int) -> str:
+    """Convert a Windows COLORREF (0x00BBGGRR LE uint32) to '#RRGGBB'."""
+    r = val & 0xFF
+    g = (val >> 8) & 0xFF
+    b = (val >> 16) & 0xFF
+    return "#%02X%02X%02X" % (r, g, b)
+
+
 def _parse_sc_line_and_shadow(sc_data: bytes) -> tuple:
     """Parse LineInfo and ShadowInfo from ShapeComponent binary data.
 
     Returns (LineShape or None, DrawingShadow or None).
+
+    Binary layout (empirically determined for HWP 5.x rect/ellipse shapes):
+      header(48) + N * matrix(48) + line_color(4) + line_width(4) + line_flags(4) + ...
+    Line data always starts at len(sc_data) - 56 from the end.
+    Face-fill color (COLORREF) is at len(sc_data) - 39.
     """
     from .objects.section.objects.picture import LineShape
-    from .objects.section.objects.drawing_object import DrawingShadow
-
-    # ShapeComponent layout after type_id (4 bytes):
-    #   offset_x(4) + offset_y(4) + orgSz_w(4) + orgSz_h(4) +
-    #   curSz_w(4) + curSz_h(4) + flip(4) + rotation_angle(2) +
-    #   rotation_cx(2) + rotation_cy(2) + renderingInfo(varies)
-    # Then for ShapeComponentNormal:
-    #   instid(4) + lineInfo + fillInfo + shadowInfo
-    #
-    # LineInfo: color(4) + thickness(4) + property(4) + outlineStyle(1) = 13 bytes min
-    # ShadowInfo: type(4) + color(4) + offsetX(4) + offsetY(4) + transparent(2) = 18 bytes
-
-    # Due to variable-length renderingInfo, we use heuristic offset scanning
-    # LineInfo color is typically an RGB value (0x00RRGGBB pattern)
-    # We look for the LineInfo structure starting after the common fields
 
     line_shape = None
-    shadow = None
 
-    # Minimum offset where lineInfo could start (after type_id + common fields)
-    # type(4) + x(4) + y(4) + ow(4) + oh(4) + cw(4) + ch(4) + flip(4) + rot(6) = 38
-    # Plus possible rendering matrices (6*8 = 48 per matrix, up to 3 matrices)
-    # instid(4) before lineInfo
-
-    if len(sc_data) < 55:
+    n = len(sc_data)
+    if n < 60:
         return (None, None)
 
-    # Try to find lineInfo by scanning for a reasonable line thickness value
-    # followed by a property uint32. Line thickness is typically 0-1000 range.
-    # Color is 4 bytes (0x00RRGGBB).
-
-    # Simplified: just extract basic line info if data is long enough
-    # We'll improve this in later phases with proper offset calculation
+    # Line data block is at a fixed distance from the END of the SC record.
+    # Verified offset (from end): line_color=-56, line_width=-52, line_flags=-48.
     try:
-        # Heuristic: look for a pattern of color(4)+thickness(4) where
-        # thickness is in range 0-5000 (HWP units) starting after offset 38
-        for off in range(38, min(len(sc_data) - 13, 200)):
-            color_val = struct.unpack_from('<I', sc_data, off)[0]
-            thickness = struct.unpack_from('<I', sc_data, off + 4)[0]
-            prop_val = struct.unpack_from('<I', sc_data, off + 8)[0]
+        off_line = n - 56
+        if off_line >= 0:
+            color_val = struct.unpack_from('<I', sc_data, off_line)[0]
+            thickness = struct.unpack_from('<I', sc_data, off_line + 4)[0]
+            flags = struct.unpack_from('<I', sc_data, off_line + 8)[0]
 
-            # Heuristic checks: color should be <= 0x00FFFFFF,
-            # thickness 1-5000, prop reasonable
-            if (0 < thickness <= 5000 and
-                color_val <= 0x00FFFFFF and
-                prop_val <= 0xFFFF):
+            if color_val <= 0x00FFFFFF and thickness <= 50000:
                 line_shape = LineShape()
-                r = (color_val >> 16) & 0xFF
-                g = (color_val >> 8) & 0xFF
-                b = color_val & 0xFF
-                line_shape.color = "#%02X%02X%02X" % (r, g, b)
+                line_shape.color = _colorref_to_hex(color_val)
                 line_shape.width = thickness
-                line_type = prop_val & 0x1F
+                # Bit 0-4 of flags encodes line type.
+                # Matches LineType2 enum: 0=NONE, 1=SOLID, 2=DOT, 3=DASH, ...
+                line_type = flags & 0x1F
                 _LINE_TYPES = {
-                    0: "SOLID", 1: "DASH", 2: "DOT", 3: "DASH_DOT",
-                    4: "DASH_DOT_DOT", 5: "LONG_DASH", 6: "CIRCLE",
+                    0: "NONE", 1: "SOLID", 2: "DOT", 3: "DASH",
+                    4: "DASH_DOT", 5: "DASH_DOT_DOT", 6: "LONG_DASH",
                 }
                 line_shape.type = _LINE_TYPES.get(line_type, "SOLID")
-                line_shape.style = "NORMAL"
-                break
     except (struct.error, IndexError):
         pass
 
-    return (line_shape, shadow)
+    return (line_shape, None)
+
+
+def _parse_sc_fill_color(sc_data: bytes) -> Optional[str]:
+    """Return the face fill color (#RRGGBB) from ShapeComponent binary data.
+
+    Face-fill COLORREF is at len(sc_data) - 39.
+    """
+    n = len(sc_data)
+    off_fill = n - 39
+    if off_fill < 0 or off_fill + 4 > n:
+        return None
+    try:
+        val = struct.unpack_from('<I', sc_data, off_fill)[0]
+        if val <= 0x00FFFFFF:
+            return _colorref_to_hex(val)
+    except (struct.error, IndexError):
+        pass
+    return None
 
 
 def _build_ole_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
@@ -3502,7 +3531,7 @@ def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[A
     container.pos.treat_as_char = bool(shape_info['property'] & 0x01)
     container.pos.affect_line_spacing = bool(shape_info['property'] & 0x02)
     container.pos.vert_rel_to = "PARA"
-    container.pos.horz_rel_to = "COLUMN"
+    container.pos.horz_rel_to = "PARA"
     container.pos.vert_align = "TOP"
     container.pos.horz_align = "LEFT"
     container.pos.vert_offset = shape_info['y_offset']
@@ -3517,14 +3546,47 @@ def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[A
     container.out_margin.top = shape_info['margin_top']
     container.out_margin.bottom = shape_info['margin_bottom']
 
+    # Extract sub_records and sc_data early (needed for SC binary overrides below)
+    sub_records = shape_info['sub_records']
+    sc_data = shape_info['sc_data']
+
     _populate_shape_component_base(
         container, shape_info['width'], shape_info['height'],
         shape_info['x_offset'], shape_info['y_offset'],
     )
 
+    # Override with actual values from container's own SC binary (is_container=True,
+    # all offsets shifted +4 vs standard GSOBASE).
+    if len(sc_data) >= 56:
+        # Container GSOBASE offsets (+4 shift):
+        #   [20:24] orgW, [24:28] orgH, [28:32] curW (height always 0)
+        #   [42:46] centerX, [46:50] centerY
+        org_w = struct.unpack_from('<I', sc_data, 20)[0]
+        org_h = struct.unpack_from('<I', sc_data, 24)[0]
+        cur_w = struct.unpack_from('<I', sc_data, 28)[0]
+        cx = struct.unpack_from('<I', sc_data, 42)[0]
+        cy = struct.unpack_from('<I', sc_data, 46)[0]
+        container.org_sz.width = org_w
+        container.org_sz.height = org_h
+        container.cur_sz.width = cur_w
+        container.cur_sz.height = 0
+        container.rotation_info.center_x = cx
+        container.rotation_info.center_y = cy
+
+    # Apply actual rendering matrices from binary
+    con_matrices = _read_sc_matrices(sc_data, is_container=True)
+    if con_matrices:
+        from .objects.section.objects.drawing_object import RenderingInfo
+        from .object_type import ObjectType as OT
+        ri = RenderingInfo()
+        ri.trans_matrix = con_matrices[0] if len(con_matrices) > 0 else container.rendering_info.trans_matrix
+        ri.sca_matrix   = con_matrices[1] if len(con_matrices) > 1 else container.rendering_info.sca_matrix
+        ri.rot_matrix   = con_matrices[2] if len(con_matrices) > 2 else container.rendering_info.rot_matrix
+        ri.extra_matrices = list(con_matrices[3:])
+        container.rendering_info = ri
+
     # Find child SHAPE_COMPONENT records (level = container SC level + 1)
-    sub_records = shape_info['sub_records']
-    sc_data = shape_info['sc_data']
+    # (sub_records and sc_data already extracted above)
 
     # The container's own ShapeComponent is the first one (level N).
     # Child ShapeComponents are at level N+1.
@@ -3565,11 +3627,19 @@ def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[A
             'sub_records': child_sub_recs,
         }
 
-        # Extract width/height from child ShapeComponent
-        # Layout: type_id(4) + x(4) + y(4) + orgW(4) + orgH(4) + curW(4) + curH(4)
+        # Extract position/size from child ShapeComponent binary data.
+        # Actual layout: type_id(4) + xOffset(4,signed) + yOffset(4,signed)
+        #                + flags(4) + orgW(4) + orgH(4) + curW(4) + curH(4)
+        # The extra flags dword at offset 12 was previously missed, causing
+        # orgH/curW to be read as width/height.
+        if len(child_data) >= 12:
+            child_info['x_offset'] = struct.unpack_from('<i', child_data, 4)[0]
+            child_info['y_offset'] = struct.unpack_from('<i', child_data, 8)[0]
         if len(child_data) >= 28:
-            child_info['width'] = struct.unpack_from('<I', child_data, 20)[0]
-            child_info['height'] = struct.unpack_from('<I', child_data, 24)[0]
+            child_info['width']  = struct.unpack_from('<I', child_data, 16)[0]  # orgW
+            child_info['height'] = struct.unpack_from('<I', child_data, 20)[0]  # orgH
+            # curW from binary; curH is always 0 for child shapes inside a container
+            child_info['cur_w']  = struct.unpack_from('<I', child_data, 24)[0]
 
         _GSO_TYPE_PICTURE   = 0x24706963
         _GSO_TYPE_OLE       = 0x246F6C65
@@ -3585,6 +3655,25 @@ def _build_container_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[A
             child_obj = _build_ole_object(child_info, hwp)
 
         if child_obj is not None:
+            # Override curSz and rendering matrices from binary
+            if hasattr(child_obj, 'cur_sz') and child_obj.cur_sz is not None:
+                child_obj.cur_sz.width  = child_info.get('cur_w', child_info['width'])
+                child_obj.cur_sz.height = 0
+            if len(child_data) >= 50:
+                cx = struct.unpack_from('<I', child_data, 38)[0]
+                cy = struct.unpack_from('<I', child_data, 42)[0]
+                if hasattr(child_obj, 'rotation_info') and child_obj.rotation_info is not None:
+                    child_obj.rotation_info.center_x = cx
+                    child_obj.rotation_info.center_y = cy
+            child_matrices = _read_sc_matrices(child_data, is_container=False)
+            if child_matrices and hasattr(child_obj, 'rendering_info'):
+                from .objects.section.objects.drawing_object import RenderingInfo
+                ri = RenderingInfo()
+                ri.trans_matrix   = child_matrices[0] if len(child_matrices) > 0 else None
+                ri.sca_matrix     = child_matrices[1] if len(child_matrices) > 1 else None
+                ri.rot_matrix     = child_matrices[2] if len(child_matrices) > 2 else None
+                ri.extra_matrices = list(child_matrices[3:])
+                child_obj.rendering_info = ri
             container.add_child(child_obj)
             child_count += 1
 
