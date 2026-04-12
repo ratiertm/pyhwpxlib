@@ -56,6 +56,13 @@ try:
 except ImportError:
     _HAS_PIL = False
 
+try:
+    from fontTools.ttLib import TTFont
+    from fontTools.subset import Subsetter, Options as SubsetOptions
+    _HAS_FONTTOOLS = True
+except ImportError:
+    _HAS_FONTTOOLS = False
+
 
 class RhwpWasmNotFoundError(RuntimeError):
     """Raised when the rhwp WASM binary cannot be located."""
@@ -207,6 +214,90 @@ class _TextMeasurer:
 
 
 # ---------------------------------------------------------------------------
+# Font embedding
+# ---------------------------------------------------------------------------
+
+def _embed_fonts_in_svg(svg: str, font_map: dict[str, str]) -> str:
+    """Parse SVG for font usage, subset TTFs, and inject @font-face CSS.
+
+    Scans ``<text font-family="...">`` elements, finds matching TTF files,
+    subsets them to only the characters actually used, base64-encodes the
+    subsets, and inserts ``@font-face`` rules into the SVG ``<defs>``.
+
+    Requires ``fonttools``.  Returns the SVG unchanged if fonttools is missing.
+    """
+    if not _HAS_FONTTOOLS:
+        return svg
+
+    import base64
+    import io
+
+    # 1. Collect (font-family, characters) from SVG
+    font_chars: dict[str, set[str]] = {}
+    for m in re.finditer(
+        r'font-family="([^"]+)"[^>]*>([^<]*)<', svg
+    ):
+        families_raw, text = m.group(1), m.group(2)
+        if not text.strip():
+            continue
+        first_family = families_raw.split(",")[0].strip().strip("'\"")
+        key = first_family.lower()
+        if key not in font_chars:
+            font_chars[key] = set()
+        font_chars[key].update(text)
+
+    if not font_chars:
+        return svg
+
+    # 2. Resolve font paths and generate @font-face
+    resolver = _TextMeasurer(font_map=font_map)
+    face_rules: list[str] = []
+
+    for family_lower, chars in font_chars.items():
+        path = resolver._resolve_path([family_lower])
+        if not os.path.exists(path):
+            continue
+        try:
+            font = TTFont(path, fontNumber=0)
+            opts = SubsetOptions()
+            opts.flavor = None  # keep as raw TTF (broadest SVG viewer support)
+            opts.desubroutinize = True
+            subsetter = Subsetter(options=opts)
+            codepoints = {ord(c) for c in chars if ord(c) > 32}
+            if not codepoints:
+                continue
+            subsetter.populate(unicodes=codepoints)
+            subsetter.subset(font)
+            buf = io.BytesIO()
+            font.save(buf)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            font.close()
+            # Use the original family name (preserving case) for CSS
+            original_family = family_lower
+            for m2 in re.finditer(r'font-family="([^"]*)"', svg):
+                first = m2.group(1).split(",")[0].strip().strip("'\"")
+                if first.lower() == family_lower:
+                    original_family = first
+                    break
+            face_rules.append(
+                f'@font-face {{ font-family: "{original_family}"; '
+                f'src: url("data:font/ttf;base64,{b64}") format("truetype"); }}'
+            )
+        except Exception:
+            continue
+
+    if not face_rules:
+        return svg
+
+    # 3. Inject <style> after opening <svg ...> tag
+    style_block = "\n<defs><style>\n" + "\n".join(face_rules) + "\n</style></defs>\n"
+    insert_pos = svg.find(">")
+    if insert_pos == -1:
+        return svg
+    return svg[: insert_pos + 1] + style_block + svg[insert_pos + 1 :]
+
+
+# ---------------------------------------------------------------------------
 # Public engine
 # ---------------------------------------------------------------------------
 
@@ -346,8 +437,17 @@ class RhwpDocument:
         self._check()
         return int(self._page_count_fn(self._engine._store, self._handle))
 
-    def render_page_svg(self, page: int) -> str:
-        """Render a single page to an SVG string."""
+    def render_page_svg(self, page: int, *, embed_fonts: bool = False) -> str:
+        """Render a single page to an SVG string.
+
+        Parameters
+        ----------
+        page : int
+            Zero-based page index.
+        embed_fonts : bool
+            If True, subset and base64-embed used fonts into the SVG so it
+            renders identically on any machine. Requires ``fonttools``.
+        """
         self._check()
         if page < 0 or page >= self.page_count:
             raise IndexError(f"page {page} out of range (0..{self.page_count - 1})")
@@ -361,11 +461,15 @@ class RhwpDocument:
             self._wb_free(self._engine._store, svg_ptr, svg_len, 1)
         except Exception:
             pass
-        return data.decode("utf-8", errors="replace")
+        svg = data.decode("utf-8", errors="replace")
+        if embed_fonts:
+            svg = _embed_fonts_in_svg(svg, self._engine._measurer._map)
+        return svg
 
-    def render_all_svgs(self) -> list[str]:
+    def render_all_svgs(self, *, embed_fonts: bool = False) -> list[str]:
         """Render every page to SVG strings."""
-        return [self.render_page_svg(i) for i in range(self.page_count)]
+        return [self.render_page_svg(i, embed_fonts=embed_fonts)
+                for i in range(self.page_count)]
 
     def close(self) -> None:
         if self._closed:

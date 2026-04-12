@@ -336,4 +336,4 @@ Dual license -- see [LICENSE.md](LICENSE.md) for details.
 | `hwp2hwpx.py`, `hwp_reader.py`, `value_convertor.py` | Apache 2.0 (derivative works) |
 | **All other files** | **BSL 1.1** |
 
-**BSL 1.1 summary:** Personal/non-commercial/educational/open-source use is free. Commercial use requires a license. Converts to Apache 2.0 after 2030-04-07.
+**BSL 1.1 summary:** Personal/non-commercial/educational/open-source use is free. Commercial use requires a license.

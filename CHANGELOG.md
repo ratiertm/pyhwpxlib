@@ -5,6 +5,21 @@ All notable changes to pyhwpxlib are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-04-13
+
+### Added
+- Font embedding in SVG output: `render_page_svg(page, embed_fonts=True)`
+  subsets used glyphs via fonttools, base64-encodes them as `@font-face`
+  rules, and injects them into the SVG. Cross-platform identical rendering.
+- `fonttools>=4.50` added to `[preview-fonts]` optional extras
+
+### Fixed
+- `hwp2hwpx.py`: strip UTF-8 surrogate characters before writing section XML
+- Merged `feature/gso-converter` branch: GSO shape conversion (Picture,
+  Rectangle, Ellipse, Line, Arc, Polygon, Curve, OLE, Container, TextArt,
+  Form controls), header/footer + page numbering, tab leader handling,
+  landscape orientation fix, BIN_DATA parsing fixes
+
 ## [0.2.0] - 2026-04-11
 
 ### Added
