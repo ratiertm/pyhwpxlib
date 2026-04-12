@@ -1044,7 +1044,7 @@ def _build_content_hpf(hwpx, hwp: _HWPDocument):
     bin_data_id_map = {}
     for bin_id, ext in hwp.bin_data_ids.items():
         hex_id = f"BIN{bin_id:04X}"
-        item_id = f"bindata{bin_id}"
+        item_id = f"BIN{bin_id:04X}"
         href = f"BinData/{hex_id}.{ext}"
         item = manifest.add_new()
         item.id = item_id
@@ -3359,7 +3359,7 @@ def _try_build_picture(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
     pic.img_rect.pt3.x, pic.img_rect.pt3.y = 0, h
 
     pic.img = Image()
-    pic.img.binaryItemIDRef = f"bindata{bin_item_id}"
+    pic.img.binaryItemIDRef = f"BIN{bin_item_id:04X}"
     pic.img.bright = 0
     pic.img.contrast = 0
 
@@ -3779,7 +3779,7 @@ def _build_ole_object(shape_info: dict, hwp: '_HWPDocument') -> Optional[Any]:
     sc_data = shape_info['sc_data']
     bin_item_id = _find_bin_item_id_in_sc(sc_data, hwp)
     if bin_item_id is not None:
-        ole.binary_item_id_ref = "bindata%d" % bin_item_id
+        ole.binary_item_id_ref = "BIN%04X" % bin_item_id
     else:
         ole.binary_item_id_ref = ""
 
