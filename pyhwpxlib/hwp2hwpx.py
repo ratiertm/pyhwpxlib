@@ -75,7 +75,8 @@ _CH_TAB_FILL_SENTINEL = 0x0001  # a low control code safely unused elsewhere
 # Public API
 # ============================================================
 
-def convert(hwp_path: str, hwpx_path: str) -> str:
+def convert(hwp_path: str, hwpx_path: str,
+            ref_owpml_path: Optional[str] = None) -> str:
     """Convert HWP file to HWPX file.
 
     Parameters
@@ -84,6 +85,10 @@ def convert(hwp_path: str, hwpx_path: str) -> str:
         Input HWP 5.x binary file path
     hwpx_path : str
         Output HWPX file path
+    ref_owpml_path : str, optional
+        Reference OWPML file (same document saved by Hancom HWP).
+        When provided, fill-tab widths are taken from the reference to
+        produce pixel-accurate leader fills.
 
     Returns
     -------
@@ -93,6 +98,8 @@ def convert(hwp_path: str, hwpx_path: str) -> str:
     hwp = _HWPDocument(hwp_path)
     hwpx_file = _build_hwpx(hwp)
     _write_hwpx_file(hwpx_file, hwpx_path, hwp)
+    if ref_owpml_path:
+        _patch_tab_widths_from_owpml(hwpx_path, ref_owpml_path)
     logger.info("HWP -> HWPX conversion complete: %s -> %s", hwp_path, hwpx_path)
     return hwpx_path
 
@@ -209,6 +216,93 @@ def _write_hwpx_file(hwpx_file, hwpx_path: str, hwp: '_HWPDocument'):
 
     with open(hwpx_path, "wb") as f:
         f.write(buf.getvalue())
+
+
+# ============================================================
+# Tab-width patch: inject widths from reference OWPML
+# ============================================================
+
+def _patch_tab_widths_from_owpml(hwpx_path: str, ref_owpml_path: str) -> None:
+    """Patch fill-tab widths in *hwpx_path* using values from *ref_owpml_path*.
+
+    The reference OWPML must be the same document saved by Hancom HWP, whose
+    layout engine computes the exact per-line fill width.  Tabs are matched
+    in document order per section file: the i-th fill tab in our output gets
+    the i-th width from the reference.
+
+    Also upgrades any plain ``<hp:tab/>`` that corresponds to a fill tab in
+    the reference (missed by _preprocess_tab_fills) to carry the correct
+    leader/type/width.
+    """
+    import io
+    import re
+    import zipfile
+
+    _FILL_TAB_RE = re.compile(
+        r'<hp:tab(?:\s+width="[^"]*")?\s+leader="3"\s+type="2"\s*/>'
+    )
+    _PLAIN_TAB_RE = re.compile(r'<hp:tab\s*/>')
+
+    # Read reference OWPML widths per section
+    ref_widths: Dict[str, List[int]] = {}
+    with zipfile.ZipFile(ref_owpml_path, 'r') as ref_zf:
+        for name in ref_zf.namelist():
+            import re as _re
+            if not _re.match(r'Contents/section\d+\.xml', name):
+                continue
+            text = ref_zf.read(name).decode('utf-8')
+            # Collect fill-tab widths in document order
+            widths = [
+                int(m.group(1))
+                for m in re.finditer(r'<hp:tab\s+width="(\d+)"\s+leader="3"\s+type="2"\s*/>', text)
+            ]
+            if widths:
+                ref_widths[name] = widths
+
+    if not ref_widths:
+        logger.debug("_patch_tab_widths_from_owpml: no fill tabs found in reference")
+        return
+
+    # Single regex matching ALL <hp:tab .../> elements in document order
+    _ANY_TAB_RE = re.compile(r'<hp:tab(?:\s[^/]*)*/>')
+
+    # Read our hwpx, patch, write back
+    buf = io.BytesIO()
+    with zipfile.ZipFile(hwpx_path, 'r') as our_zf:
+        entries = []
+        for info in our_zf.infolist():
+            data = our_zf.read(info.filename)
+            sec_name = info.filename
+            if sec_name in ref_widths:
+                text = data.decode('utf-8')
+                widths = ref_widths[sec_name]
+                idx = [0]
+
+                def _replace_any_tab(m, _widths=widths, _idx=idx):
+                    if _idx[0] >= len(_widths):
+                        return m.group(0)
+                    w = _widths[_idx[0]]
+                    _idx[0] += 1
+                    return f'<hp:tab width="{w}" leader="3" type="2"/>'
+
+                # Single pass: replace ALL tabs in document order
+                text = _ANY_TAB_RE.sub(_replace_any_tab, text)
+                data = text.encode('utf-8')
+            entries.append((info, data))
+
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as out_zf:
+            for info, data in entries:
+                if info.filename == 'mimetype':
+                    zi = zipfile.ZipInfo('mimetype')
+                    zi.compress_type = zipfile.ZIP_STORED
+                    out_zf.writestr(zi, data)
+                else:
+                    out_zf.writestr(info.filename, data)
+
+    with open(hwpx_path, 'wb') as f:
+        f.write(buf.getvalue())
+
+    logger.debug("_patch_tab_widths_from_owpml: patched %s", hwpx_path)
 
 
 # ============================================================
@@ -1247,8 +1341,10 @@ def _build_char_properties(ref_list, hwp: _HWPDocument):
         ul = cp.create_underline()
         ul_type_str = underline_type(cs.get('underline_type', 0))
         ul.type = UnderlineType.from_string(ul_type_str)
-        ul_shape_str = _line_type3_str(cs.get('underline_shape', 0))
-        ul.shape = LineType3.from_string(ul_shape_str)
+        ul_shape_val = cs.get('underline_shape', 0)
+        # In HWP charShape, underline/strikeout shape encoding starts at 0=SOLID
+        # (unlike border types where 0=NONE). Map directly.
+        ul.shape = LineType3.from_string(_underline_shape_str(ul_shape_val))
         ul.color = color_from_int(cs.get('underline_color', 0))
 
         # Strikeout
@@ -1295,6 +1391,23 @@ def _line_type3_str(val: int) -> str:
     return line_type3(val)
 
 
+def _underline_shape_str(val: int) -> str:
+    """HWP underline/strikeout shape -> LineType3 string.
+
+    HWP encoding for underline/strikeout shape starts at 0=SOLID (unlike
+    border types where 0=NONE).  Mapping: 0=SOLID, 1=DASH, 2=DOT, 3=DASH_DOT,
+    4=DASH_DOT_DOT, 5=LONG_DASH, 6=CIRCLE, 7=DOUBLE_SLIM, 8=SLIM_THICK,
+    9=THICK_SLIM, 10=SLIM_THICK_SLIM, 11=WAVE, 12=DOUBLEWAVE.
+    """
+    _MAP = {
+        0: "SOLID", 1: "DASH", 2: "DOT", 3: "DASH_DOT",
+        4: "DASH_DOT_DOT", 5: "LONG_DASH", 6: "CIRCLE", 7: "DOUBLE_SLIM",
+        8: "SLIM_THICK", 9: "THICK_SLIM", 10: "SLIM_THICK_SLIM",
+        11: "WAVE", 12: "DOUBLEWAVE",
+    }
+    return _MAP.get(val, "SOLID")
+
+
 # ============================================================
 # 4d. TabProperties
 # ============================================================
@@ -1303,13 +1416,12 @@ def _build_tab_properties(ref_list, hwp: _HWPDocument):
     from .objects.header.enum_types import LineType2, TabItemType, ValueUnit2
 
     # HWP leader byte → HWPX LineType2
-    # NOTE: Hancom's own converter maps HWP UNDERSCORE(3) → HWPX DOT,
-    # not SOLID.  SOLID is used for thick-line fills only.
+    # Verified against owpml: HWP leader=3 (UNDERSCORE/DASH) → HWPX DASH (index=3)
     _LEADER_MAP = {
         0: LineType2.NONE,
         1: LineType2.DOT,
         2: LineType2.DOT,        # DOT_SPACE → DOT
-        3: LineType2.DOT,        # UNDERSCORE → DOT (Hancom HWPX convention)
+        3: LineType2.DASH,       # DASH/UNDERSCORE → DASH (owpml confirmed)
         4: LineType2.DASH,       # EQUAL → DASH
         5: LineType2.SOLID,      # THICK_LINE → SOLID
     }
@@ -2117,12 +2229,12 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
 def _preprocess_tab_fills(chars: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     """Preprocess HWP tab-fill sequences.
 
-    HWP pattern: TAB + fill_char(>=0x20) + NULL(0x0000) + closing_TAB
-    → SENTINEL + TAB(leader=DOT) + closing_TAB
+    HWP pattern: TAB + fill_char(>=0x20 or fwSpace=0x1F) + NULL(0x0000) + ... + closing_TAB
+    → SENTINEL + TAB
 
-    The fill characters (visual filler like CJK chars) are dropped.
-    The SENTINEL signals _flush_run to write leader="DOT" on the next TAB.
-    The closing TAB is preserved to position the page number correctly.
+    The SENTINEL signals _flush_run to emit leader="3" (DASH) on the TAB.
+    Fill characters and the closing TAB are all dropped because the owpml
+    format uses a single <hp:tab leader="3" type="2"/> with no fill chars.
     """
     result: List[Tuple[int, int]] = []
     i = 0
@@ -2130,20 +2242,18 @@ def _preprocess_tab_fills(chars: List[Tuple[int, int]]) -> List[Tuple[int, int]]
         pos_i, ch_i = chars[i]
         if (ch_i == _CH_TAB
                 and i + 1 < len(chars)
-                and chars[i + 1][1] >= 0x0020
+                and (chars[i + 1][1] >= 0x0020 or chars[i + 1][1] == _CH_FWSPACE)
                 and i + 2 < len(chars)
                 and chars[i + 2][1] == 0x0000):
-            # Opening fill TAB
+            # Opening fill TAB: emit SENTINEL then TAB
+            result.append((pos_i, _CH_TAB_FILL_SENTINEL))
             result.append((pos_i, _CH_TAB))
             i += 1  # skip opening TAB (already emitted)
-            # Collect fill chars (including post-NULL chars) until closing TAB,
-            # ALL bound to pos_i so they stay in the same charPr run as the TAB.
+            # Skip all fill chars until closing TAB
             while i < len(chars) and chars[i][1] != _CH_TAB:
-                fc = chars[i][1]
-                if fc != 0x0000 and fc >= 0x0020:  # skip NULL, keep printable
-                    result.append((pos_i, fc))
                 i += 1
-            # Closing TAB stays in stream to position the page number
+            if i < len(chars):
+                i += 1  # skip closing TAB too
         else:
             result.append((pos_i, ch_i))
             i += 1
@@ -2229,9 +2339,15 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
         # Check if charPrId changed
         char_pr = get_char_pr_id(char_pos)
         if char_pr != current_char_pr:
+            # Carry SENTINEL to new run if it's trailing (paired with next TAB)
+            sentinel_carry = None
+            if current_run_chars and current_run_chars[-1][1] == _CH_TAB_FILL_SENTINEL:
+                sentinel_carry = current_run_chars.pop()
             if current_run_chars:
                 _flush_run(para, current_char_pr, current_run_chars)
             current_run_chars = []
+            if sentinel_carry:
+                current_run_chars.append(sentinel_carry)
             current_char_pr = char_pr
 
         current_run_chars.append((char_pos, ch))
@@ -2255,12 +2371,14 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
     # _preprocess_tab_fills() before the chars were split into runs.
     t = run.add_new_t()
     text_buf = []
+    tab_fill_next = False
 
     for char_pos, ch in chars:
         if ch == _CH_TAB_FILL_SENTINEL:
-            continue  # sentinel no longer used, skip silently
+            tab_fill_next = True
+            continue
         if ch >= 0x0020:
-            # Normal character (includes fill chars between tab pairs)
+            # Normal character
             text_buf.append(chr(ch))
         elif ch == _CH_LINE_BREAK:
             # Flush text, add lineBreak
@@ -2273,7 +2391,12 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
             if text_buf:
                 t.add_text(''.join(text_buf))
                 text_buf = []
-            t.add_new_tab()
+            tab = t.add_new_tab()
+            if tab_fill_next:
+                tab.width = 0    # width=0: viewer re-computes from tabPr at render time
+                tab.leader = 3   # DASH (owpml leader="3")
+                tab.type = 2     # RIGHT (owpml type="2")
+                tab_fill_next = False
         elif ch == _CH_NBSPACE:
             # Non-breaking space
             if text_buf:
@@ -2373,8 +2496,6 @@ def build_sec_pr_for_section(run, hwp: _HWPDocument, records: List[dict]):
     sec_pr.text_direction = TextDirection.HORIZONTAL
     sec_pr.space_columns = 1134
     sec_pr.tab_stop = 8000
-    sec_pr.tab_stop_val = 4000
-    sec_pr.tab_stop_unit = ValueUnit1.HWPUNIT.value
     sec_pr.outline_shape_id_ref = "1"
     sec_pr.memo_shape_id_ref = "0"
     sec_pr.text_vertical_width_head = False
@@ -2791,9 +2912,16 @@ def _build_text_runs(para, chars: List[Tuple[int, int]],
             continue
         char_pr = get_char_pr_id(char_pos)
         if char_pr != current_char_pr:
+            # If SENTINEL is the last item, carry it to the new run so it
+            # remains paired with its following TAB even across charPr boundaries.
+            sentinel_carry = None
+            if current_run_chars and current_run_chars[-1][1] == _CH_TAB_FILL_SENTINEL:
+                sentinel_carry = current_run_chars.pop()
             if current_run_chars:
                 _flush_run(para, current_char_pr, current_run_chars)
             current_run_chars = []
+            if sentinel_carry:
+                current_run_chars.append(sentinel_carry)
             current_char_pr = char_pr
         current_run_chars.append((char_pos, ch))
 
