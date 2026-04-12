@@ -2303,6 +2303,24 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
     ctrl_iter = iter(ctrl_indices)
     current_run_chars: List[Tuple[int, int]] = []
     current_char_pr = get_char_pr_id(chars[0][0]) if chars else "0"
+    # Track current ctrl-only run so consecutive ctrl items with same charPr
+    # can share one run (e.g. pgnp + head in the same run, matching Hancom output).
+    _ctrl_run: Optional[Any] = None
+    _ctrl_run_char_pr: Optional[str] = None
+
+    def _get_or_new_ctrl_run(char_pr: str) -> Any:
+        nonlocal _ctrl_run, _ctrl_run_char_pr
+        if _ctrl_run is not None and _ctrl_run_char_pr == char_pr:
+            return _ctrl_run
+        _ctrl_run = para.add_new_run()
+        _ctrl_run.char_pr_id_ref = char_pr
+        _ctrl_run_char_pr = char_pr
+        return _ctrl_run
+
+    def _reset_ctrl_run():
+        nonlocal _ctrl_run, _ctrl_run_char_pr
+        _ctrl_run = None
+        _ctrl_run_char_pr = None
 
     for char_pos, ch in chars:
         # Extended control chars (including table, field_begin, section_def, column_def, etc.)
@@ -2320,6 +2338,7 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
             if current_run_chars:
                 _flush_run(para, current_char_pr, current_run_chars)
                 current_run_chars = []
+                _reset_ctrl_run()
 
             # Consume the corresponding control record
             ci = next(ctrl_iter, None)
@@ -2327,46 +2346,47 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
             if ci is not None:
                 ctrl_rec = pg[ci]
                 ctrl_id = _get_ctrl_id(ctrl_rec['data'])
+                char_pr = get_char_pr_id(char_pos)
                 if ctrl_id == _CTRL_ID_TABLE and ch == _CH_TABLE:
                     sub_recs = _collect_sub_records(pg, ci)
                     tbl = _build_table_object(sub_recs, ctrl_rec, hwp)
                     run = para.add_new_run()
-                    run.char_pr_id_ref = get_char_pr_id(char_pos)
+                    run.char_pr_id_ref = char_pr
                     run._item_list.append(tbl)
+                    _reset_ctrl_run()
                 elif ctrl_id == _CTRL_ID_GSO and ch == _CH_TABLE:
                     sub_recs = _collect_sub_records(pg, ci)
                     gso_obj = _build_gso_object(sub_recs, ctrl_rec, hwp)
                     if gso_obj is not None:
                         run = para.add_new_run()
-                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        run.char_pr_id_ref = char_pr
                         run._item_list.append(gso_obj)
+                    _reset_ctrl_run()
                 elif ctrl_id == _CTRL_ID_FORM and ch == _CH_TABLE:
                     sub_recs = _collect_sub_records(pg, ci)
                     form_obj = _build_form_object(sub_recs, ctrl_rec, hwp)
                     if form_obj is not None:
                         run = para.add_new_run()
-                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        run.char_pr_id_ref = char_pr
                         run._item_list.append(form_obj)
+                    _reset_ctrl_run()
                 elif ctrl_id in (_CTRL_ID_HEADER, _CTRL_ID_FOOTER) and ch == _CH_HEAD_FOOT:
                     sub_recs = _collect_sub_records(pg, ci)
                     hf_obj = _build_header_footer_object(sub_recs, ctrl_rec, hwp)
                     if hf_obj is not None:
-                        run = para.add_new_run()
-                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        run = _get_or_new_ctrl_run(char_pr)
                         ctrl_wrap = run.add_new_ctrl()
                         ctrl_wrap.add_ctrl_item(hf_obj)
                 elif ctrl_id == _CTRL_ID_AUTO_NUM and ch == _CH_AUTO_NUM:
                     an_obj = _build_auto_num_object(ctrl_rec)
                     if an_obj is not None:
-                        run = para.add_new_run()
-                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        run = _get_or_new_ctrl_run(char_pr)
                         ctrl_wrap = run.add_new_ctrl()
                         ctrl_wrap.add_ctrl_item(an_obj)
                 elif ctrl_id == _CTRL_ID_PAGE_NUM and ch == _CH_PAGE_NUM:
                     pn_obj = _build_page_num_object(ctrl_rec)
                     if pn_obj is not None:
-                        run = para.add_new_run()
-                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        run = _get_or_new_ctrl_run(char_pr)
                         ctrl_wrap = run.add_new_ctrl()
                         ctrl_wrap.add_ctrl_item(pn_obj)
 
