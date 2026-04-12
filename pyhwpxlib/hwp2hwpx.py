@@ -2115,13 +2115,39 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
 
 
 def _preprocess_tab_fills(chars: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    """Pass chars through unchanged.
+    """Preprocess HWP tab-fill sequences.
 
-    Tab-fill sequences (TAB + fill_chars + NULL + closing_TAB) are preserved
-    as-is so that the fill chars render naturally as text content between two
-    hp:tab elements, matching the original HWPX format.
+    HWP pattern: TAB + fill_char(>=0x20) + NULL(0x0000) + closing_TAB
+    → SENTINEL + TAB(leader=DOT) + closing_TAB
+
+    The fill characters (visual filler like CJK chars) are dropped.
+    The SENTINEL signals _flush_run to write leader="DOT" on the next TAB.
+    The closing TAB is preserved to position the page number correctly.
     """
-    return chars
+    result: List[Tuple[int, int]] = []
+    i = 0
+    while i < len(chars):
+        pos_i, ch_i = chars[i]
+        if (ch_i == _CH_TAB
+                and i + 1 < len(chars)
+                and chars[i + 1][1] >= 0x0020
+                and i + 2 < len(chars)
+                and chars[i + 2][1] == 0x0000):
+            # Opening fill TAB
+            result.append((pos_i, _CH_TAB))
+            i += 1  # skip opening TAB (already emitted)
+            # Collect fill chars (including post-NULL chars) until closing TAB,
+            # ALL bound to pos_i so they stay in the same charPr run as the TAB.
+            while i < len(chars) and chars[i][1] != _CH_TAB:
+                fc = chars[i][1]
+                if fc != 0x0000 and fc >= 0x0020:  # skip NULL, keep printable
+                    result.append((pos_i, fc))
+                i += 1
+            # Closing TAB stays in stream to position the page number
+        else:
+            result.append((pos_i, ch_i))
+            i += 1
+    return result
 
 
 def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
@@ -2155,9 +2181,15 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
     for char_pos, ch in chars:
         # Extended control chars (including table, field_begin, section_def, column_def, etc.)
         # each consume one control record from ctrl_iter.
+        # _CH_TAB_FILL_SENTINEL is synthetic (from _preprocess_tab_fills) and must NOT
+        # consume a ctrl_iter entry.
         is_extended = (1 <= ch <= 31 and ch not in
                        (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END))
         if is_extended:
+            if ch == _CH_TAB_FILL_SENTINEL:
+                current_run_chars.append((char_pos, ch))
+                continue
+
             # Flush pending text run
             if current_run_chars:
                 _flush_run(para, current_char_pr, current_run_chars)
@@ -2225,6 +2257,8 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
     text_buf = []
 
     for char_pos, ch in chars:
+        if ch == _CH_TAB_FILL_SENTINEL:
+            continue  # sentinel no longer used, skip silently
         if ch >= 0x0020:
             # Normal character (includes fill chars between tab pairs)
             text_buf.append(chr(ch))
@@ -2235,7 +2269,7 @@ def _flush_run(para, char_pr_id: str, chars: List[Tuple[int, int]]):
                 text_buf = []
             t.add_new_line_break()
         elif ch == _CH_TAB:
-            # Flush text, add tab (no attributes - matches original HWPX format)
+            # Flush text, add tab
             if text_buf:
                 t.add_text(''.join(text_buf))
                 text_buf = []
@@ -2744,10 +2778,17 @@ def _build_text_runs(para, chars: List[Tuple[int, int]],
                 break
         return result
 
+    # Pre-process tab-fill sequences: TAB+fill+NULL → SENTINEL+TAB(leader=DOT)+TAB
+    chars = _preprocess_tab_fills(chars)
+
     current_run_chars = []
     current_char_pr = get_char_pr_id(chars[0][0]) if chars else "0"
 
     for char_pos, ch in chars:
+        # Sentinel: stays in current run, no charPr split
+        if ch == _CH_TAB_FILL_SENTINEL:
+            current_run_chars.append((char_pos, ch))
+            continue
         char_pr = get_char_pr_id(char_pos)
         if char_pr != current_char_pr:
             if current_run_chars:

@@ -215,7 +215,10 @@ def _write_t_item(xsb: XMLStringBuilder, item: Any) -> None:
             xsb.attribute(AN.width, item.width)
         leader = getattr(item, "leader", None)
         if leader is not None:
-            if hasattr(leader, "index") and not callable(leader.index):
+            # leader may be a string ("DOT"), enum, or int
+            if isinstance(leader, str):
+                xsb.attribute(AN.leader, leader)
+            elif hasattr(leader, "index") and not callable(leader.index):
                 xsb.attribute(AN.leader, str(leader.index))
             else:
                 xsb.attribute_index(AN.leader, leader)
