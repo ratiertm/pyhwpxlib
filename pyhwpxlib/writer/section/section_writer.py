@@ -411,6 +411,8 @@ def _write_parameter(xsb: XMLStringBuilder, p: Any) -> None:
 def _write_header_footer(xsb: XMLStringBuilder, hf: Any, ot: ObjectType) -> None:
     elem = EN.hp_header if ot == ObjectType.hp_header else EN.hp_footer
     xsb.open_element(elem)
+    xsb.attribute(AN.id, getattr(hf, "id", None))
+    xsb.attribute(AN.applyPageType, hf.applyPageType if hasattr(hf, "applyPageType") else getattr(hf, "apply_page_type", None))
 
     sub_list = getattr(hf, "subList", getattr(hf, "sub_list", None))
     if sub_list is not None:
@@ -434,6 +436,15 @@ def _write_auto_num(xsb: XMLStringBuilder, an: Any) -> None:
     xsb.open_element(EN.hp_autoNum)
     xsb.attribute(AN.numType, an.numType if hasattr(an, "numType") else getattr(an, "num_type", None))
     xsb.attribute(AN.num, an.num)
+    anf = getattr(an, "autoNumFormat", getattr(an, "auto_num_format", None))
+    if anf is not None:
+        xsb.open_element(EN.hp_autoNumFormat)
+        xsb.attribute(AN.type, anf.type)
+        xsb.attribute(AN.userChar, anf.userChar if hasattr(anf, "userChar") else getattr(anf, "user_char", None))
+        xsb.attribute(AN.prefixChar, anf.prefixChar if hasattr(anf, "prefixChar") else getattr(anf, "prefix_char", None))
+        xsb.attribute(AN.suffixChar, anf.suffixChar if hasattr(anf, "suffixChar") else getattr(anf, "suffix_char", None))
+        xsb.attribute(AN.supscript, anf.supscript)
+        xsb.close_element()
     xsb.close_element()
 
 

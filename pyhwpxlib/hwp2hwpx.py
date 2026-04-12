@@ -58,9 +58,21 @@ _CH_TABLE = 11     # also GSO, button, etc.
 _CH_TAB = 9
 _CH_LINE_BREAK = 10
 _CH_PARA_END = 13
+_CH_HEAD_FOOT = 16  # header / footer inline control
+_CH_AUTO_NUM = 18   # auto number (page, footnote, endnote, etc.)
+_CH_NEW_NUM = 24    # NOTE: conflicts with _CH_HYPHEN below; only in non-text context
 _CH_NBSPACE = 30
 _CH_FWSPACE = 31
-_CH_HYPHEN = 24
+_CH_HYPHEN = 24     # same code as _CH_NEW_NUM but context differentiates
+
+# CTRL_HEADER ctrl-ids for header/footer/auto-num
+_CTRL_ID_HEADER   = 0x68656164  # 'head'
+_CTRL_ID_FOOTER   = 0x666f6f74  # 'foot'
+_CTRL_ID_AUTO_NUM = 0x61746e6f  # 'atno'
+_CTRL_ID_NEW_NUM  = 0x6e776e6f  # 'nwno'
+
+# applyPageType mapping for header/footer (HWP prop bits 0-1)
+_APPLY_PAGE_TYPE = {0: 'BOTH', 1: 'EVEN', 2: 'ODD'}
 
 # Extended control char codes (occupy 8 wchars total)
 _EXTENDED_CHARS = set(range(1, 32)) - {_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END}
@@ -2190,16 +2202,16 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
                 i += 36
 
     if text_data is not None:
-        # Parse text into chars - handle table chars for nested tables
+        # Parse text into chars - handle extended ctrl chars (table, auto-num, etc.)
         chars = []
         i = 0
         pos = 0
-        table_char_indices = []  # indices of ch=11 in chars list
+        needs_ctrl_processing = False  # True when any ctrl char needs a ctrl record
         while i < len(text_data) - 1:
             ch = struct.unpack_from('<H', text_data, i)[0]
             i += 2
-            if ch == _CH_TABLE:
-                table_char_indices.append(len(chars))
+            if ch in (_CH_TABLE, _CH_AUTO_NUM, _CH_HEAD_FOOT):
+                needs_ctrl_processing = True
             chars.append((pos, ch))
             if ch == _CH_PARA_END:
                 pos += 1
@@ -2210,8 +2222,8 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
             else:
                 pos += 1
 
-        if table_char_indices:
-            # Cell has nested tables - build runs with table handling
+        if needs_ctrl_processing:
+            # Has inline ctrl objects (table/auto-num/header-footer) - use ctrl-aware builder
             ctrl_indices = _find_ctrl_headers_in_group(pg)
             _build_text_runs_with_tables(para, chars, char_shape_pairs,
                                           pg, ctrl_indices, hwp)
@@ -2308,29 +2320,44 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
             # Consume the corresponding control record
             ci = next(ctrl_iter, None)
 
-            if ci is not None and ch == _CH_TABLE:
+            if ci is not None:
                 ctrl_rec = pg[ci]
                 ctrl_id = _get_ctrl_id(ctrl_rec['data'])
-                if ctrl_id == _CTRL_ID_TABLE:
+                if ctrl_id == _CTRL_ID_TABLE and ch == _CH_TABLE:
                     sub_recs = _collect_sub_records(pg, ci)
                     tbl = _build_table_object(sub_recs, ctrl_rec, hwp)
                     run = para.add_new_run()
                     run.char_pr_id_ref = get_char_pr_id(char_pos)
                     run._item_list.append(tbl)
-                elif ctrl_id == _CTRL_ID_GSO:
+                elif ctrl_id == _CTRL_ID_GSO and ch == _CH_TABLE:
                     sub_recs = _collect_sub_records(pg, ci)
                     gso_obj = _build_gso_object(sub_recs, ctrl_rec, hwp)
                     if gso_obj is not None:
                         run = para.add_new_run()
                         run.char_pr_id_ref = get_char_pr_id(char_pos)
                         run._item_list.append(gso_obj)
-                elif ctrl_id == _CTRL_ID_FORM:
+                elif ctrl_id == _CTRL_ID_FORM and ch == _CH_TABLE:
                     sub_recs = _collect_sub_records(pg, ci)
                     form_obj = _build_form_object(sub_recs, ctrl_rec, hwp)
                     if form_obj is not None:
                         run = para.add_new_run()
                         run.char_pr_id_ref = get_char_pr_id(char_pos)
                         run._item_list.append(form_obj)
+                elif ctrl_id in (_CTRL_ID_HEADER, _CTRL_ID_FOOTER) and ch == _CH_HEAD_FOOT:
+                    sub_recs = _collect_sub_records(pg, ci)
+                    hf_obj = _build_header_footer_object(sub_recs, ctrl_rec, hwp)
+                    if hf_obj is not None:
+                        run = para.add_new_run()
+                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        ctrl_wrap = run.add_new_ctrl()
+                        ctrl_wrap.add_ctrl_item(hf_obj)
+                elif ctrl_id == _CTRL_ID_AUTO_NUM and ch == _CH_AUTO_NUM:
+                    an_obj = _build_auto_num_object(ctrl_rec)
+                    if an_obj is not None:
+                        run = para.add_new_run()
+                        run.char_pr_id_ref = get_char_pr_id(char_pos)
+                        ctrl_wrap = run.add_new_ctrl()
+                        ctrl_wrap.add_ctrl_item(an_obj)
 
             # Reset char_pr for next segment
             current_char_pr = get_char_pr_id(char_pos)
@@ -2746,7 +2773,7 @@ def _build_paragraph_with_secpr(section, hwp: _HWPDocument, pg: List[dict],
                 line_segs.append(seg)
                 i += 36
 
-    # Check if this paragraph has section def control or table controls
+    # Check if this paragraph has section def control or table/header/auto-num controls
     has_sec_def = False
     has_table = False
     if text_data:
@@ -2756,8 +2783,8 @@ def _build_paragraph_with_secpr(section, hwp: _HWPDocument, pg: List[dict],
             j += 2
             if ch == _CH_SECTION_DEF:
                 has_sec_def = True
-            elif ch == _CH_TABLE:
-                has_table = True
+            elif ch in (_CH_TABLE, _CH_HEAD_FOOT, _CH_AUTO_NUM):
+                has_table = True  # any ctrl object requiring ctrl record processing
             elif ch == _CH_PARA_END:
                 break
             if 1 <= ch <= 31 and ch not in (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END):
@@ -2932,6 +2959,100 @@ def _build_text_runs(para, chars: List[Tuple[int, int]],
         run = para.add_new_run()
         run.char_pr_id_ref = "0"
         run.add_new_t()
+
+
+# ============================================================
+# Header / Footer / AutoNum Builders
+# ============================================================
+
+def _build_auto_num_object(ctrl_rec: dict) -> Optional[Any]:
+    """Build an AutoNum CtrlItem from an 'atno' CTRL_HEADER record."""
+    from .objects.section.ctrl import AutoNum, AutoNumFormat
+    from .objects.section.enum_types import NumType, NumberType2
+
+    data = ctrl_rec['data']
+    # 'atno' layout: [0-3] ctrl_id, [4-7] numType, [8-11] num
+    num_type_val = struct.unpack_from('<I', data, 4)[0] if len(data) >= 8 else 0
+    num_val      = struct.unpack_from('<I', data, 8)[0] if len(data) >= 12 else 1
+
+    _NUM_TYPE_MAP = {
+        0: NumType.PAGE, 1: NumType.FOOTNOTE, 2: NumType.ENDNOTE,
+        3: NumType.PICTURE, 4: NumType.TABLE, 5: NumType.EQUATION,
+        6: NumType.TOTAL_PAGE,
+    }
+    num_type = _NUM_TYPE_MAP.get(num_type_val, NumType.PAGE)
+
+    an = AutoNum()
+    an.num = num_val
+    an.num_type = num_type
+    anf = an.create_auto_num_format()
+    anf.type = NumberType2.DIGIT
+    anf.user_char = ""
+    anf.prefix_char = ""
+    anf.suffix_char = ""
+    anf.supscript = False
+    return an
+
+
+def _build_header_footer_object(sub_records: List[dict], ctrl_rec: dict,
+                                 hwp: '_HWPDocument') -> Optional[Any]:
+    """Build a Header or Footer CtrlItem from HWP records.
+
+    *sub_records* are the records immediately following the CTRL_HEADER (LIST_HEADER
+    + content PARA_HEADER/PARA_TEXT/... records).
+    *ctrl_rec* is the CTRL_HEADER record ('head' or 'foot').
+    """
+    from .objects.section.ctrl import Header, Footer, AutoNum, AutoNumFormat
+    from .objects.section.enum_types import (
+        ApplyPageType, NumType, NumberType2,
+        TextDirection, LineWrapMethod, VerticalAlign2,
+    )
+    from .objects.section.section_xml_file import SubList
+    from .objects.section.paragraph import Para, Run, T
+
+    data = ctrl_rec['data']
+    ctrl_id = _get_ctrl_id(data)
+    # 'head'/'foot' layout: [0-3] ctrl_id, [4-7] applyPageType, [8-11] id
+    prop     = struct.unpack_from('<I', data, 4)[0] if len(data) >= 8 else 0
+    hf_id    = struct.unpack_from('<I', data, 8)[0] if len(data) >= 12 else 1
+
+    apt_map = {0: ApplyPageType.BOTH, 1: ApplyPageType.EVEN, 2: ApplyPageType.ODD}
+    apt = apt_map.get(prop, ApplyPageType.BOTH)
+
+    is_header = (ctrl_id == _CTRL_ID_HEADER)
+    hf = Header() if is_header else Footer()
+    hf.id = str(hf_id)
+    hf.apply_page_type = apt
+
+    # Find LIST_HEADER to get textWidth/textHeight
+    list_hdr = None
+    for rec in sub_records:
+        if rec['tag'] == _TAG_LIST_HEADER:
+            list_hdr = rec
+            break
+
+    sub_list = hf.create_sub_list()
+    sub_list.id = ""
+    sub_list.text_direction = TextDirection.HORIZONTAL
+    sub_list.line_wrap = LineWrapMethod.BREAK
+    sub_list.vert_align = VerticalAlign2.TOP if is_header else VerticalAlign2.BOTTOM
+    sub_list.link_list_id_ref = "0"
+    sub_list.link_list_next_id_ref = "0"
+    sub_list.has_text_ref = False
+    sub_list.has_num_ref = False
+
+    if list_hdr is not None and len(list_hdr['data']) >= 16:
+        lhd = list_hdr['data']
+        text_width  = struct.unpack_from('<I', lhd, 8)[0]
+        text_height = struct.unpack_from('<I', lhd, 12)[0]
+        sub_list.text_width  = text_width
+        sub_list.text_height = text_height
+
+    # Build content paragraphs from sub_records (skip the LIST_HEADER itself)
+    content_recs = [r for r in sub_records if r is not list_hdr]
+    _build_cell_paragraphs(sub_list, content_recs, hwp)
+
+    return hf
 
 
 # ============================================================
