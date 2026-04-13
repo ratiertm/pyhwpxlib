@@ -34,7 +34,8 @@ def _get_engine():
 def render_svg(
     hwpx_path: str,
     page: int = 0,
-    embed_fonts: bool = True,
+    embed_fonts: bool = False,
+    substitute_fonts: bool | str = True,
 ) -> str:
     """Render a single page to an SVG string.
 
@@ -45,14 +46,20 @@ def render_svg(
     page : int
         Zero-based page index.
     embed_fonts : bool
-        If True (default), subset and embed Korean fonts into the SVG
-        so it renders correctly on any platform. **Set this to True
-        whenever the SVG will be converted to PNG or displayed on a
-        machine without Korean fonts installed.**
+        Subset + base64-embed fonts into SVG. Best for browser viewing,
+        but cairosvg cannot read TTC-embedded fonts. Default False.
+    substitute_fonts : bool | str
+        Replace SVG font-family chains with an installed Korean system
+        font (Apple SD Gothic Neo / Malgun Gothic). **Default True** —
+        this is the most reliable way to ensure Korean text renders
+        correctly in both browsers and rasterizers (cairosvg, qlmanage).
+        Pass a string to target a specific font family.
     """
     engine = _get_engine()
     with engine.load(hwpx_path) as doc:
-        return doc.render_page_svg(page, embed_fonts=embed_fonts)
+        return doc.render_page_svg(page,
+                                    embed_fonts=embed_fonts,
+                                    substitute_fonts=substitute_fonts)
 
 
 def render_pages(
@@ -60,7 +67,8 @@ def render_pages(
     out_dir: str,
     *,
     max_pages: Optional[int] = None,
-    embed_fonts: bool = True,
+    embed_fonts: bool = False,
+    substitute_fonts: bool | str = True,
     fmt: str = "svg",
 ) -> list[dict]:
     """Render all (or some) pages to files.
@@ -96,7 +104,9 @@ def render_pages(
             n = min(n, max_pages)
 
         for i in range(n):
-            svg_str = doc.render_page_svg(i, embed_fonts=embed_fonts)
+            svg_str = doc.render_page_svg(i,
+                                           embed_fonts=embed_fonts,
+                                           substitute_fonts=substitute_fonts)
             svg_path = os.path.join(out_dir, f"{stem}_p{i+1:02d}.svg")
             with open(svg_path, "w", encoding="utf-8") as f:
                 f.write(svg_str)

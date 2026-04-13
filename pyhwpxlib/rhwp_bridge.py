@@ -214,7 +214,42 @@ class _TextMeasurer:
 
 
 # ---------------------------------------------------------------------------
-# Font embedding
+# Font substitution (most reliable for rasterizers like cairosvg)
+# ---------------------------------------------------------------------------
+
+def _detect_default_korean_font() -> str:
+    """Return a system-installed Korean font family name suitable for SVG
+    rendering. Picks the best available on macOS → Windows → generic fallback.
+    """
+    candidates = [
+        ("/System/Library/Fonts/AppleSDGothicNeo.ttc", "Apple SD Gothic Neo"),
+        # Windows common paths
+        ("C:/Windows/Fonts/malgun.ttf", "Malgun Gothic"),
+        ("C:/Windows/Fonts/batang.ttc", "Batang"),
+    ]
+    for path, name in candidates:
+        if os.path.exists(path):
+            return name
+    return "Apple SD Gothic Neo"
+
+
+_FONT_FAMILY_RE = re.compile(r'font-family="([^"]+)"')
+
+
+def _substitute_fonts_in_svg(svg: str, target_family: str) -> str:
+    """Replace every ``font-family="..."`` chain in an SVG with a single
+    installed Korean font followed by generic fallbacks.
+
+    This is the most reliable way to make Korean text render correctly in
+    SVG rasterizers that can't load @font-face embedded fonts (e.g., cairosvg
+    with TTC files).
+    """
+    replacement = f'font-family="{target_family}, sans-serif"'
+    return _FONT_FAMILY_RE.sub(replacement, svg)
+
+
+# ---------------------------------------------------------------------------
+# Font embedding (browser viewing — cairosvg has TTC limitations)
 # ---------------------------------------------------------------------------
 
 def _embed_fonts_in_svg(svg: str, font_map: dict[str, str]) -> str:
@@ -224,9 +259,18 @@ def _embed_fonts_in_svg(svg: str, font_map: dict[str, str]) -> str:
     subsets them to only the characters actually used, base64-encodes the
     subsets, and inserts ``@font-face`` rules into the SVG ``<defs>``.
 
-    Requires ``fonttools``.  Returns the SVG unchanged if fonttools is missing.
+    Requires ``fonttools``.  Emits a warning (once) and returns the SVG
+    unchanged if fonttools is missing.
     """
     if not _HAS_FONTTOOLS:
+        import warnings
+        warnings.warn(
+            "embed_fonts=True requires fonttools. Korean text may render as "
+            "empty boxes when the SVG is rasterized or displayed on systems "
+            "without Korean fonts. Install with: pip install pyhwpxlib[preview]",
+            RuntimeWarning,
+            stacklevel=3,
+        )
         return svg
 
     import base64
@@ -437,7 +481,13 @@ class RhwpDocument:
         self._check()
         return int(self._page_count_fn(self._engine._store, self._handle))
 
-    def render_page_svg(self, page: int, *, embed_fonts: bool = False) -> str:
+    def render_page_svg(
+        self,
+        page: int,
+        *,
+        embed_fonts: bool = False,
+        substitute_fonts: bool | str = False,
+    ) -> str:
         """Render a single page to an SVG string.
 
         Parameters
@@ -447,6 +497,15 @@ class RhwpDocument:
         embed_fonts : bool
             If True, subset and base64-embed used fonts into the SVG so it
             renders identically on any machine. Requires ``fonttools``.
+            Note: cairosvg cannot read TTC-embedded fonts. For PNG
+            rasterization, prefer ``substitute_fonts=True``.
+        substitute_fonts : bool | str
+            If True, replace SVG ``font-family`` chains with an installed
+            Korean system font (Apple SD Gothic Neo on macOS, Malgun Gothic
+            on Windows). If a string, use that font name as the target.
+            This is the most reliable way to make Korean text render
+            correctly in rasterizers like cairosvg. Mutually exclusive
+            with ``embed_fonts`` in practice — prefer this for PNG output.
         """
         self._check()
         if page < 0 or page >= self.page_count:
@@ -462,13 +521,23 @@ class RhwpDocument:
         except Exception:
             pass
         svg = data.decode("utf-8", errors="replace")
+        if substitute_fonts:
+            target = (substitute_fonts if isinstance(substitute_fonts, str)
+                      else _detect_default_korean_font())
+            svg = _substitute_fonts_in_svg(svg, target)
         if embed_fonts:
             svg = _embed_fonts_in_svg(svg, self._engine._measurer._map)
         return svg
 
-    def render_all_svgs(self, *, embed_fonts: bool = False) -> list[str]:
+    def render_all_svgs(
+        self,
+        *,
+        embed_fonts: bool = False,
+        substitute_fonts: bool | str = False,
+    ) -> list[str]:
         """Render every page to SVG strings."""
-        return [self.render_page_svg(i, embed_fonts=embed_fonts)
+        return [self.render_page_svg(i, embed_fonts=embed_fonts,
+                                      substitute_fonts=substitute_fonts)
                 for i in range(self.page_count)]
 
     def close(self) -> None:

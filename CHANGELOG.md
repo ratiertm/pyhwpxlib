@@ -5,6 +5,42 @@ All notable changes to pyhwpxlib are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-04-14
+
+### Added
+- **`substitute_fonts` parameter** on `render_page_svg()` and
+  `render_all_svgs()`. Replaces SVG `font-family` chains with an installed
+  Korean system font (Apple SD Gothic Neo on macOS, Malgun Gothic on
+  Windows). This is the most reliable way to make Korean render correctly
+  in SVG rasterizers like cairosvg.
+- `pyhwpxlib.preview.render_svg/render_pages` now default to
+  `substitute_fonts=True`, so PNG conversions always show Korean correctly.
+
+### Fixed
+- **Korean text rendered as □□□ in PNG output** even with
+  `embed_fonts=True`. Root cause: cairosvg cannot load TTC-embedded fonts
+  (Apple SD Gothic Neo is a TTC collection). Font substitution sidesteps
+  this by referencing installed system fonts by name.
+- **`fonttools` moved into `[preview]` extras.** In 0.3.x it was only in
+  `[preview-fonts]`, so `pip install pyhwpxlib[preview]` had
+  `embed_fonts=True` silently no-op'ing.
+- `_embed_fonts_in_svg` now emits a RuntimeWarning when fonttools is
+  missing instead of silently returning unmodified SVG.
+
+### Changed
+- `[preview]` extras: `wasmtime + fonttools`
+- `[preview-fonts]` extras: `wasmtime + fonttools + Pillow` (Pillow adds
+  accurate text width measurement; optional)
+
+### Recommended usage
+For Korean text in PNG output:
+```python
+from pyhwpxlib.preview import render_pages
+render_pages("doc.hwpx", "/tmp")  # substitute_fonts=True by default
+```
+
+For pure browser viewing, `embed_fonts=True` still works.
+
 ## [0.3.2] - 2026-04-14
 
 ### Added

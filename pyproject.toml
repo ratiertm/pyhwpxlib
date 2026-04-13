@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyhwpxlib"
-version = "0.3.2"
+version = "0.3.3"
 description = "Python library for creating, editing, and previewing HWPX (Hancom Office) documents without Hancom Office"
 readme = "README.md"
 license = "BUSL-1.1 AND Apache-2.0"
@@ -29,13 +29,16 @@ dependencies = []
 images = ["Pillow>=9.0"]
 lxml = ["lxml>=4.9"]
 hwp = ["olefile>=0.46"]
-preview = ["wasmtime>=25.0"]
-preview-fonts = ["wasmtime>=25.0", "Pillow>=9.0", "fonttools>=4.50"]
+# preview now includes fonttools so Korean text embeds correctly by default.
+# preview-fonts adds Pillow for more accurate text measurement (optional).
+preview = ["wasmtime>=25.0", "fonttools>=4.50"]
+preview-fonts = ["wasmtime>=25.0", "fonttools>=4.50", "Pillow>=9.0"]
 all = [
     "Pillow>=9.0",
     "lxml>=4.9",
     "olefile>=0.46",
     "wasmtime>=25.0",
+    "fonttools>=4.50",
 ]
 
 [project.scripts]
