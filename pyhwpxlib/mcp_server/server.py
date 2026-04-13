@@ -40,7 +40,7 @@ mcp = FastMCP("hangul-docs", instructions="Korean 한/글 document tools — cre
 def _with_preview(hwpx_path: str) -> dict:
     """Auto-generate PNG preview for any HWPX output. Always included."""
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-    from scripts.preview import render_pages
+    from pyhwpxlib.preview import render_pages
 
     pages = render_pages(hwpx_path, "/tmp")
     for p in pages:
@@ -151,7 +151,7 @@ def hwpx_build_step(actions: str, step_name: str = "", output: str = "/tmp/hwpx_
     """
     from pyhwpxlib import HwpxBuilder
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-    from scripts.preview import render_pages
+    from pyhwpxlib.preview import render_pages
 
     action_list = json.loads(actions) if isinstance(actions, str) else actions
 
@@ -211,7 +211,7 @@ def hwpx_preview(file: str, out_dir: str = "/tmp") -> str:
     Returns JSON with page count and PNG file paths.
     """
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-    from scripts.preview import render_pages
+    from pyhwpxlib.preview import render_pages
 
     results = render_pages(_abs(file), out_dir)
 

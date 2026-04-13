@@ -285,11 +285,15 @@ from pyhwpxlib.rhwp_bridge import RhwpEngine
 engine = RhwpEngine()  # one-time WASM load
 with engine.load("sample.hwp") as doc:   # HWP or HWPX
     print(doc.page_count)
-    svg = doc.render_page_svg(0)
-    all_svgs = doc.render_all_svgs()
+    svg = doc.render_page_svg(0, embed_fonts=True)   # Korean fonts embedded
+    all_svgs = doc.render_all_svgs(embed_fonts=True)
 ```
 
-For accurate Korean text measurement on macOS, install Pillow as well:
+> **Important:** Always use `embed_fonts=True` when Korean text is involved.
+> Without it, Korean characters may appear as empty boxes (tofu) on machines
+> without Korean fonts installed.
+
+For accurate text measurement and font embedding, install with fonts extras:
 
 ```bash
 pip install pyhwpxlib[preview-fonts]

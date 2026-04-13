@@ -5,6 +5,17 @@ All notable changes to pyhwpxlib are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-04-14
+
+### Added
+- `pyhwpxlib/preview.py` — canonical preview module with `embed_fonts=True` default
+- `CLAUDE.md` — project conventions, Korean font rendering guide for AI agents
+
+### Fixed
+- MCP server: `scripts.preview` import was broken (module didn't exist).
+  Now uses `pyhwpxlib.preview` which properly embeds Korean fonts in SVG
+- README: added `embed_fonts=True` to all SVG examples with Korean text warning
+
 ## [0.3.0] - 2026-04-14
 
 ### Added
