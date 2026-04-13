@@ -5,6 +5,16 @@ All notable changes to pyhwpxlib are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-14
+
+### Added
+- `pyhwpxlib.json_io` — JSON roundtrip for HWPX documents (encoder/decoder/schema)
+- `pyhwpxlib.mcp_server` — MCP server (`hangul-docs`) for LLM integration
+- `pyhwpxlib.presets` — document presets for common Korean document types
+
+### Fixed
+- `hwp2hwpx.py`: fwSpace/nbSpace/hyphen 뒤 텍스트가 누락되는 버그 수정
+
 ## [0.2.1] - 2026-04-13
 
 ### Added
