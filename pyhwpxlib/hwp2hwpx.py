@@ -2223,7 +2223,8 @@ def _build_cell_paragraph(sub_list, pg: List[dict], hwp: '_HWPDocument'):
             if ch == _CH_PARA_END:
                 pos += 1
                 break
-            elif 1 <= ch <= 31 and ch not in (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END):
+            elif 1 <= ch <= 31 and ch not in (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END,
+                                               _CH_FWSPACE, _CH_NBSPACE, _CH_HYPHEN):
                 i += 14
                 pos += 8
             else:
@@ -2331,7 +2332,8 @@ def _build_text_runs_with_tables(para, chars: List[Tuple[int, int]],
         # _CH_TAB_FILL_SENTINEL is synthetic (from _preprocess_tab_fills) and must NOT
         # consume a ctrl_iter entry.
         is_extended = (1 <= ch <= 31 and ch not in
-                       (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END))
+                       (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END,
+                        _CH_FWSPACE, _CH_NBSPACE, _CH_HYPHEN))
         if is_extended:
             if ch == _CH_TAB_FILL_SENTINEL:
                 current_run_chars.append((char_pos, ch))
@@ -2821,7 +2823,8 @@ def _build_paragraph_with_secpr(section, hwp: _HWPDocument, pg: List[dict],
                 has_table = True  # any ctrl object requiring ctrl record processing
             elif ch == _CH_PARA_END:
                 break
-            if 1 <= ch <= 31 and ch not in (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END):
+            if 1 <= ch <= 31 and ch not in (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END,
+                                               _CH_FWSPACE, _CH_NBSPACE, _CH_HYPHEN):
                 j += 14
 
     # Build runs
@@ -2858,7 +2861,8 @@ def _build_runs_with_secpr(para, hwp: _HWPDocument, text_data: bytes,
         if ch == _CH_PARA_END:
             pos += 1
             break
-        elif 1 <= ch <= 31 and ch not in (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END):
+        elif 1 <= ch <= 31 and ch not in (_CH_TAB, _CH_LINE_BREAK, _CH_PARA_END,
+                                               _CH_FWSPACE, _CH_NBSPACE, _CH_HYPHEN):
             i += 14
             pos += 8
         else:
