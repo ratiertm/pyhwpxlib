@@ -240,7 +240,7 @@ def hwpx_fill_form(file: str, mappings: str, output: str) -> str:
     Returns JSON with applied/failed counts and details.
     """
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-    from templates.form_pipeline import fill_by_labels
+    from pyhwpxlib.form_pipeline import fill_by_labels
 
     mapping_dict = json.loads(mappings) if isinstance(mappings, str) else mappings
     result = fill_by_labels(_abs(file), mapping_dict, _abs(output))
@@ -259,7 +259,7 @@ def hwpx_analyze_form(file: str) -> str:
     Returns JSON with tables, cells, and suggested fill paths.
     """
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-    from templates.form_pipeline import extract_form, find_cell_by_label
+    from pyhwpxlib.form_pipeline import extract_form, find_cell_by_label
 
     form = extract_form(_abs(file))
     fields = []

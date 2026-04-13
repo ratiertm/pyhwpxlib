@@ -5,6 +5,19 @@ All notable changes to pyhwpxlib are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-04-14
+
+### Added
+- `pyhwpxlib.form_pipeline` — label-based form filling with cellAddr navigation
+  - `extract_form(path)` — parse all tables and cells
+  - `find_cell_by_label(form, label, direction)` — locate cell adjacent to a label
+  - `fill_by_labels(template, mappings, output)` — batch-fill via `"label>direction"` syntax
+- MCP tool `hwpx_fill_form` and `hwpx_analyze_form` now work (previously broken)
+
+### Fixed
+- MCP server imports `templates.form_pipeline` — module didn't exist in the
+  package, breaking two tools. Now uses `pyhwpxlib.form_pipeline`.
+
 ## [0.3.1] - 2026-04-14
 
 ### Added
