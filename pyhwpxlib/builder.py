@@ -21,6 +21,29 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 BLANK_TEMPLATE = SCRIPT_DIR / "tools" / "blank.hwpx"
 
+
+def _contrast_text_color(bg_hex: str) -> str:
+    """Return a contrasting text color (near-white or near-black) for a given
+    background hex color, based on relative luminance (WCAG 2.0).
+
+    Used to auto-pick header text color when the preset doesn't specify one
+    but the user provides a custom ``header_bg``.
+    """
+    s = bg_hex.lstrip('#')
+    if len(s) != 6:
+        return '#2b3437'  # default dark text
+    try:
+        r = int(s[0:2], 16) / 255.0
+        g = int(s[2:4], 16) / 255.0
+        b = int(s[4:6], 16) / 255.0
+    except ValueError:
+        return '#2b3437'
+    # sRGB relative luminance (WCAG)
+    def ch(c):
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    L = 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    return '#f7f7ff' if L < 0.5 else '#2b3437'
+
 # HWPX 네임스페이스
 NS = {
     'hp': 'http://www.hancom.co.kr/hwpml/2011/paragraph',
@@ -203,7 +226,10 @@ class HwpxBuilder:
                         cell_aligns[(r, c)] = d_align
 
         # header_text: 프리셋에서 헤더 행 글자 스타일 자동 적용
+        # 프리셋에 값이 없고 header_bg가 있으면, 배경 대비 자동 계산
         h_text = preset.get('header_text')
+        if not h_text and header_bg:
+            h_text = _contrast_text_color(header_bg)
         if h_text:
             cell_styles = cell_styles or {}
             for c in range(cols):
